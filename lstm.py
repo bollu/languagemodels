@@ -7,9 +7,9 @@ import torch.optim as optim
 
 torch.manual_seed(1)
 
-EMBEDSIZE = 3
-HSIZE = 5           
-GSIZE = 7           
+EMBEDSIZE = 5
+HSIZE = 10          
+GSIZE = 10
 
 #                                   o1  o2         on
 #                                G2O^   ^          ^
@@ -23,12 +23,14 @@ class RNN:
         self.H0 = torch.randn((1, HSIZE), requires_grad=True, dtype=torch.float32)
         self.I2H = torch.randn((EMBEDSIZE, HSIZE), requires_grad=True, dtype=torch.float32)
         self.H2H = torch.randn((HSIZE, HSIZE), requires_grad=True, dtype=torch.float32)
+        self.H2HBIAS = torch.randn((1, HSIZE), requires_grad=True, dtype=torch.float32)
         self.H2G = torch.randn((HSIZE, GSIZE), requires_grad=True, dtype=torch.float32)
         self.G2G = torch.randn((GSIZE, GSIZE), requires_grad=True, dtype=torch.float32)
+        self.G2GBIAS = torch.randn((1, GSIZE), requires_grad=True, dtype=torch.float32)
         self.G2O = torch.randn((GSIZE, EMBEDSIZE), requires_grad=True, dtype=torch.float32)
 
     def get_params(self):
-        return [self.H0, self.I2H, self.H2H, self.H2G, self.G2G, self.G2O]
+        return [self.H0, self.I2H, self.H2H, self.H2G, self.G2G, self.G2O, self.H2HBIAS, self.G2GBIAS]
 
     # predict next words
     # inputs: SENTENCELEN x EMBEDSIZE
@@ -37,13 +39,13 @@ class RNN:
         h = self.H0
         for i in range(inputs.size()[0]):
             # update hidde state
-            h = torch.tanh(h @ self.H2H + inputs[i] @ self.I2H)
+            h = torch.tanh(h @ self.H2H + inputs[i] @ self.I2H + self.H2HBIAS)
 
         g = h @ self.H2G
         outs = []
         for i in range(npredict):
             outs.append(g @ self.G2O)
-            g = g @ self.G2G
+            g = torch.tanh(g @ self.G2G + self.G2GBIAS)
         return torch.stack(outs)
 
 # remove the "xx:yy"  from a verse "xx:yy ..." and return the "..."
@@ -70,6 +72,16 @@ def load_bible():
         vocab = Counter([w for s in sentences for w in s])
         return sentences, vocab
 
+def load_quick_brown_fox():
+    with open("./corpora/quick-brown-fox.txt", "r") as f:
+        sentences = []
+        for l in f.read().split("."):
+            l = l.replace("\n", " ")
+            l = l.strip()
+            sentences.append([w for w in l.split() if w])
+    vocab = Counter([w for s in sentences for w in s])
+    return (sentences, vocab)
+
 def calc_num_params(params):
     sz = torch.tensor(1)
     for t in params:
@@ -83,6 +95,28 @@ def windows(l, m, xs):
     for i in range(len(xs) - l - m + 1):
         yield (xs[i:i+l], xs[i+l:i+l+m])
 
+# number of windows returned from windows
+def nwindows(l, m, xs):
+    return max(0, len(xs) - l - m + 1)
+
+def cosine(v, w):
+    v = v.view(-1)
+    w = w.view(-1)
+    return torch.dot(v, w) / v.norm() / w.norm()
+
+# return index in embeds of vector closest to v
+def get_closest_vector_ix(embeds, v):
+    bestix = 0
+    bestd = 1000
+    with torch.no_grad():
+        for i in range(embeds.size()[0]):
+            d = torch.dot(embeds[i], v.reshape(-1))
+            if d < bestd:
+                bestix = i
+                bestd = d
+    return bestix
+
+
 def get_embedding_matrix(embeds, w2ix, words):
     out = []
     for w in words:
@@ -90,12 +124,14 @@ def get_embedding_matrix(embeds, w2ix, words):
     return torch.stack(out)
 
 if __name__ == "__main__":
-    SENTENCELEN = 5
-    PREDICTLEN = 3
+    SENTENCELEN = 3
+    PREDICTLEN = 1
+    NEPOCHS = 3000
 
-    ss, vcount = load_bible()
+    ss, vcount = load_quick_brown_fox()
     vocab = set(vcount)
     vocab2ix = dict(zip(vocab, range(len(vocab))))
+    ix2vocab = dict([(ix, w) for (w, ix) in vocab2ix.items()])
     vocabsize = len(vocab)
     # embeddings, jointly trained with the model
     embeds = torch.randn((vocabsize, EMBEDSIZE), requires_grad=True)
@@ -104,10 +140,34 @@ if __name__ == "__main__":
     optimizer = optim.SGD([embeds] + model.get_params(), lr=1e-2)
     print("number of hyperparameters of model: %s" % calc_num_params(model.get_params()))
 
-    # for each sentence, take window of word size and then
+    totalsize = 0
     for s in ss:
-        for (in_, out_) in windows(SENTENCELEN, PREDICTLEN, s):
-            in_ = get_embedding_matrix(embeds, vocab2ix, in_)
-            out_ = get_embedding_matrix(embeds, vocab2ix, out_)
-            predict = model.fwd(in_, PREDICTLEN)
+        totalsize += nwindows(SENTENCELEN, PREDICTLEN, s)
+    totalsize *= NEPOCHS
+
+
+    # for each sentence, take window of word size and then
+    iteration = 0
+    for _ in range(NEPOCHS):
+        for s in ss:
+            for (in_, out_) in windows(SENTENCELEN, PREDICTLEN, s):
+                iteration += 1
+                optimizer.zero_grad()
+                encin_ = get_embedding_matrix(embeds, vocab2ix, in_)
+                encout_ = get_embedding_matrix(embeds, vocab2ix, out_)
+                predict = model.fwd(encin_, PREDICTLEN)
+
+                # loss is how far apart they are in cosine similarity
+                loss = 0
+                for i in range(encout_.size()[0]):
+                    # should try to maximise the dot product between the encout_ and the predict_
+                    loss += cosine(encout_[i], predict[i]) # - torch.tanh(torch.dot(encout_[i], predict[i].view(-1)))
+
+                loss.backward()
+                optimizer.step()
+
+                if iteration % 1000 == 0:
+                    decodepredict = [ix2vocab[get_closest_vector_ix(embeds, predict[i])] for i in  range(PREDICTLEN)]
+                    print("%4.2f |  loss: %4.2f" % (iteration / totalsize * 100.0,  loss, ))
+                    print("\t%s (%s | %s) " % (in_, out_, decodepredict))
 
