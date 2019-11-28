@@ -51,7 +51,7 @@ class RNN:
     def fwd(self, inputs, npredict):
         h = self.H0
         for i in range(inputs.size()[0]):
-            # update hidde state
+            # update hidden state
             h = torch.tanh(torch.matmul(h, self.H2H) +  \
                            torch.matmul(inputs[i], self.I2H) +  \
                            self.H2HBIAS)
@@ -162,11 +162,7 @@ def get_closest_vector_ix(embeds, v):
     return bestix
 
 
-def get_embedding_matrix(embeds, w2ix, words):
-    out = []
-    for w in words:
-        out.append(embeds[w2ix[w]])
-    return torch.stack(out)
+
 
 def train():
     SENTENCELEN = 3
@@ -184,6 +180,9 @@ def train():
     # embeddings, jointly trained with the model
     # embeds = torch.empty((vocabsize, EMBEDSIZE), device=device).uniform_(-0.5/EMBEDSIZE, 0.5/EMBEDSIZE)
     embeds = torch.randn((vocabsize, EMBEDSIZE), device=device, requires_grad=True)
+
+    # encode the ss into the corpus
+    ss = [[vocab2ix[w] for w in s] for s in ss]
 
     model = RNN(HSIZE, EMBEDSIZE, GSIZE)
     optimizer = optim.SGD([embeds] + model.get_params(), lr=1e-2)
@@ -203,8 +202,8 @@ def train():
             for (in_, out_) in windows(SENTENCELEN, PREDICTLEN, s):
                 iteration += 1
                 optimizer.zero_grad()
-                encin_ = get_embedding_matrix(embeds, vocab2ix, in_)
-                encout_ = get_embedding_matrix(embeds, vocab2ix, out_)
+                encin_ = embeds[in_]
+                encout_ = embeds[out_]
                 predict = model.fwd(encin_, PREDICTLEN)
 
                 # loss is how far apart they are in cosine similarity
@@ -219,7 +218,7 @@ def train():
                 if iteration % 1000 == 3:
                     decodepredict = [ix2vocab[get_closest_vector_ix(embeds, predict[i])] for i in  range(PREDICTLEN)]
                     print("%4.2f |  loss: %4.2f" % ((100.0 * iteration) / totalsize,  loss, ))
-                    print("\t%s (%s | %s) " % (in_, out_, decodepredict))
+                    print("\t%s (%s | %s) " % ([ix2vocab[i] for i in in_], [ix2vocab[o] for o in out_], decodepredict))
 
     savedict = model.save_dict()
     savedict.update({"embeds": embeds, 
@@ -268,7 +267,7 @@ def repl():
             for (w, dist) in closestWordsDesc(ix2vocab, embeds, embeds[vocab2ix[w]]):
                 print ("%20s %4.2f " % (w, dist))
         elif response[0] == "!" and len(response) >= 2:
-            encin_ = get_embedding_matrix(embeds, vocab2ix, response[1:])
+            encin_ = embeds[[w2ix[w] for w in words]]
             predict = model.fwd(encin_, PREDICTLEN)
             decodepredict = [ix2vocab[get_closest_vector_ix(embeds, predict[i])] for i in  range(PREDICTLEN)]
             print(decodepredict)
