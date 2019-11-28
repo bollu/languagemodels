@@ -5,10 +5,12 @@ import torch
 import torch.nn as nn
 import torch.optim as optim
 import fire
-from prompt_toolkit import prompt
+# from prompt_toolkit import prompt
 
 
 torch.manual_seed(1)
+device = torch.device("cuda:0" if torch.cuda.is_available() else "cpu")
+
 
 
 #                                   o1  o2         on
@@ -20,18 +22,28 @@ class RNN:
     def __init__(self, HSIZE, EMBEDSIZE, GSIZE):
         # hidden stat
         # 1 x HSIZE
-        self.H0 = torch.randn((1, HSIZE), requires_grad=True, dtype=torch.float32)
-        self.I2H = torch.randn((EMBEDSIZE, HSIZE), requires_grad=True, dtype=torch.float32)
-        self.H2H = torch.randn((HSIZE, HSIZE), requires_grad=True, dtype=torch.float32)
-        self.H2G = torch.randn((HSIZE, GSIZE), requires_grad=True, dtype=torch.float32)
-        self.G2G = torch.randn((GSIZE, GSIZE), requires_grad=True, dtype=torch.float32)
-        self.G2O = torch.randn((GSIZE, EMBEDSIZE), requires_grad=True, dtype=torch.float32)
-        self.H2HBIAS = torch.randn((1, HSIZE), requires_grad=True, dtype=torch.float32)
-        self.G2GBIAS = torch.randn((1, GSIZE), requires_grad=True, dtype=torch.float32)
-        self.G2OBIAS = torch.randn((1, EMBEDSIZE), requires_grad=True, dtype=torch.float32)
+        self.H0 = torch.randn((1, HSIZE), requires_grad=True,
+                              dtype=torch.float32, device=device)
+        self.I2H = torch.randn((EMBEDSIZE, HSIZE), requires_grad=True,
+                               dtype=torch.float32, device=device)
+        self.H2H = torch.randn((HSIZE, HSIZE), requires_grad=True,
+                               dtype=torch.float32, device=device)
+        self.H2G = torch.randn((HSIZE, GSIZE), requires_grad=True,
+                               dtype=torch.float32,device=device)
+        self.G2G = torch.randn((GSIZE, GSIZE), requires_grad=True,
+                               dtype=torch.float32, device=device)
+        self.G2O = torch.randn((GSIZE, EMBEDSIZE), requires_grad=True,
+                               dtype=torch.float32,device=device)
+        self.H2HBIAS = torch.randn((1, HSIZE), requires_grad=True,
+                                   dtype=torch.float32,device=device)
+        self.G2GBIAS = torch.randn((1, GSIZE), requires_grad=True,
+                                   dtype=torch.float32,device=device)
+        self.G2OBIAS = torch.randn((1, EMBEDSIZE), requires_grad=True,
+                                   dtype=torch.float32,device=device)
 
     def get_params(self):
-        return [self.H0, self.I2H, self.H2H, self.H2G, self.G2G, self.G2O, self.H2HBIAS, self.G2GBIAS]
+        return [self.H0, self.I2H, self.H2H, self.H2G, 
+                self.G2G, self.G2O, self.H2HBIAS, self.G2GBIAS, self.G2OBIAS]
 
     # predict next words
     # inputs: SENTENCELEN x EMBEDSIZE
@@ -40,13 +52,15 @@ class RNN:
         h = self.H0
         for i in range(inputs.size()[0]):
             # update hidde state
-            h = torch.tanh(h @ self.H2H + inputs[i] @ self.I2H + self.H2HBIAS)
+            h = torch.tanh(torch.matmul(h, self.H2H) +  \
+                           torch.matmul(inputs[i], self.I2H) +  \
+                           self.H2HBIAS)
 
-        g = h @ self.H2G
+        g = torch.matmul(h, self.H2G)
         outs = []
         for i in range(npredict):
-            outs.append(torch.tanh(g @ self.G2O + self.G2OBIAS))
-            g = torch.tanh(g @ self.G2G + self.G2GBIAS)
+            outs.append(torch.tanh(torch.matmul(g, self.G2O) + self.G2OBIAS))
+            g = torch.tanh(torch.matmul(g, self.G2G) + self.G2GBIAS)
         return torch.stack(outs)
 
     def save_dict(self):
@@ -69,6 +83,15 @@ class RNN:
         self.G2O = load["G2O"]
         self.H2HBIAS = load["H2HBIAS"]
         self.G2GBIAS = load["G2GBIAS"]
+
+        self.H0.to(device)
+        self.I2H.to(device)
+        self.H2H.to(device)
+        self.H2G.to(device)
+        self.G2G.to(device)
+        self.G2O.to(device)
+        self.H2HBIAS.to(device)
+        self.G2GBIAS.to(device)
 
 # remove the "xx:yy"  from a verse "xx:yy ..." and return the "..."
 def remove_verse_number(s): 
@@ -147,9 +170,9 @@ def get_embedding_matrix(embeds, w2ix, words):
 
 def train():
     SENTENCELEN = 3
-    PREDICTLEN = 1
+    PREDICTLEN = 2
     NEPOCHS = 3000
-    EMBEDSIZE = 5
+    EMBEDSIZE = 10
     HSIZE = 10          
     GSIZE = 10
 
@@ -159,7 +182,8 @@ def train():
     ix2vocab = dict([(ix, w) for (w, ix) in vocab2ix.items()])
     vocabsize = len(vocab)
     # embeddings, jointly trained with the model
-    embeds = torch.randn((vocabsize, EMBEDSIZE), requires_grad=True)
+    embeds = torch.empty((vocabsize, EMBEDSIZE), device=device).uniform_(-0.5/EMBEDSIZE, 0.5/EMBEDSIZE)
+    embeds.requires_grad_()
 
     model = RNN(HSIZE, EMBEDSIZE, GSIZE)
     optimizer = optim.SGD([embeds] + model.get_params(), lr=1e-2)
@@ -194,7 +218,7 @@ def train():
 
                 if iteration % 1000 == 3:
                     decodepredict = [ix2vocab[get_closest_vector_ix(embeds, predict[i])] for i in  range(PREDICTLEN)]
-                    print("%4.2f |  loss: %4.2f" % (iteration / totalsize * 100.0,  loss, ))
+                    print("%4.2f |  loss: %4.2f" % ((100.0 * iteration) / totalsize,  loss, ))
                     print("\t%s (%s | %s) " % (in_, out_, decodepredict))
 
     savedict = model.save_dict()
@@ -234,7 +258,7 @@ def repl():
     model.load_from_dict(loaddict)
 
     while True:
-        response = prompt(">")
+        response = str(raw_input(">"))
         if not response: continue
         response = response.split(" ")
         if response[0] == "~" and len(response) == 2:
