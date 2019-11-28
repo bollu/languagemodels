@@ -13,6 +13,11 @@ set<string> vocab;
 map<string, int> word2ix;
 map<int, string> ix2word;
 
+// end of sentence is denoted by -1
+int num_sentences = 0;
+static const long MAX_SENTENCES = 1e5;
+static const long MAX_SENTENCE_LEN = 1e2;
+int ss[MAX_SENTENCES][MAX_SENTENCE_LEN];
 vector<vector<int> > sentences;
 
 void add_word_to_vocab(string w) {

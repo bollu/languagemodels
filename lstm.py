@@ -1,4 +1,4 @@
-#!/usr/bin/env python3
+#!/usr/bin/env python2
 import re
 from collections import *
 import torch
@@ -47,21 +47,17 @@ class RNN:
 
     # predict next words
     # inputs: SENTENCELEN x EMBEDSIZE
-    # output: NPREDICT x EMBEDSIZE
-    def fwd(self, inputs, npredict):
+    # output: EMBEDSIZE
+    def fwd(self, inputs, sentencelen):
         h = self.H0
-        for i in range(inputs.size()[0]):
-            # update hidde state
+        for i in range(sentencelen):
+            # update hidden state for each word in sentence
             h = torch.tanh(torch.matmul(h, self.H2H) +  \
                            torch.matmul(inputs[i], self.I2H) +  \
                            self.H2HBIAS)
 
         g = torch.matmul(h, self.H2G)
-        outs = []
-        for i in range(npredict):
-            outs.append(torch.tanh(torch.matmul(g, self.G2O) + self.G2OBIAS))
-            g = torch.tanh(torch.matmul(g, self.G2G) + self.G2GBIAS)
-        return torch.stack(outs)
+        return torch.tanh(torch.matmul(g, self.G2O) + self.G2OBIAS)
 
     def save_dict(self):
         return {"H0": self.H0, 
@@ -134,22 +130,20 @@ def calc_num_params(params):
     return sz.item()
 
 # return sliding windows of length l, followed by predict window of length m
-# In [3]: list(windows(3, 2, [1, 2, 3, 4, 5, 6, 7]))
-# Out[3]: [([1, 2, 3], [4, 5]), ([2, 3, 4], [5, 6]), ([3, 4, 5], [6, 7])]
-def windows(l, m, xs):
-    for i in range(len(xs) - l - m + 1):
-        yield (xs[i:i+l], xs[i+l:i+l+m])
+def windows(l, xs):
+    for i in range(len(xs) - l):
+        yield (xs[i:i+l], xs[i+l])
 
 # number of windows returned from windows
-def nwindows(l, m, xs):
-    return max(0, len(xs) - l - m + 1)
+def nwindows(l, xs):
+    return max(0, len(xs) - l)
 
+# V: EMBEDSIZE, W: EMBEDSIZE
 def cosine(v, w):
-    v = v.view(-1)
-    w = w.view(-1)
-    return torch.dot(v, w) / v.norm() / w.norm()
+    return torch.dot(v.view(-1), w.view(-1)) / v.norm() / w.norm()
 
 # return index in embeds of vector closest to v
+# embeds: EMBEDSIZE
 def get_closest_vector_ix(embeds, v):
     bestix = 0
     bestd = 1000
@@ -162,19 +156,14 @@ def get_closest_vector_ix(embeds, v):
     return bestix
 
 
-def get_embedding_matrix(embeds, w2ix, words):
-    out = []
-    for w in words:
-        out.append(embeds[w2ix[w]])
-    return torch.stack(out)
+
 
 def train():
-    SENTENCELEN = 3
-    PREDICTLEN = 2
+    SENTENCELEN = 2
     NEPOCHS = 3000
-    EMBEDSIZE = 10
-    HSIZE = 10          
-    GSIZE = 10
+    EMBEDSIZE = 5
+    HSIZE = 5
+    GSIZE = 5
 
     ss, vcount = load_quick_brown_fox()
     vocab = set(vcount)
@@ -182,52 +171,55 @@ def train():
     ix2vocab = dict([(ix, w) for (w, ix) in vocab2ix.items()])
     vocabsize = len(vocab)
     # embeddings, jointly trained with the model
-    embeds = torch.empty((vocabsize, EMBEDSIZE), device=device).uniform_(-0.5/EMBEDSIZE, 0.5/EMBEDSIZE)
-    embeds.requires_grad_()
+    embeds = torch.randn((vocabsize, EMBEDSIZE), device=device, requires_grad=True)
+
+    # encode the ss into the corpus
+    ss = [[vocab2ix[w] for w in s] for s in ss]
 
     model = RNN(HSIZE, EMBEDSIZE, GSIZE)
-    optimizer = optim.SGD([embeds] + model.get_params(), lr=1e-2)
+    optimizer = optim.SGD([embeds] + model.get_params(), lr=0.01)
     print("number of hyperparameters of model: %s" % 
             calc_num_params(model.get_params()))
 
     totalsize = 0
     for s in ss:
-        totalsize += nwindows(SENTENCELEN, PREDICTLEN, s)
+        totalsize += nwindows(SENTENCELEN, s)
     totalsize *= NEPOCHS
 
 
     # for each sentence, take window of word size and then
     iteration = 0
+
     for _ in range(NEPOCHS):
         for s in ss:
-            for (in_, out_) in windows(SENTENCELEN, PREDICTLEN, s):
+            for (in_, out_) in windows(SENTENCELEN, s):
                 iteration += 1
                 optimizer.zero_grad()
-                encin_ = get_embedding_matrix(embeds, vocab2ix, in_)
-                encout_ = get_embedding_matrix(embeds, vocab2ix, out_)
-                predict = model.fwd(encin_, PREDICTLEN)
+                # EMBEDSIZE
+                encin_ = embeds[in_]
+                # EMBEDSIZE
+                encout_ = embeds[out_]
+                # EMBEDSIZE
+                predict = model.fwd(encin_, SENTENCELEN)
 
                 # loss is how far apart they are in cosine similarity
-                loss = 0
-                for i in range(encout_.size()[0]):
-                    # should try to maximise the dot product between the encout_ and the predict_
-                    loss += cosine(encout_[i], predict[i]) # - torch.tanh(torch.dot(encout_[i], predict[i].view(-1)))
-
+                # loss = 1
+                loss = cosine(encout_, predict)
                 loss.backward()
                 optimizer.step()
 
-                if iteration % 1000 == 3:
-                    decodepredict = [ix2vocab[get_closest_vector_ix(embeds, predict[i])] for i in  range(PREDICTLEN)]
+                if iteration % 1000 >= 998:
+                    decodepredict = ix2vocab[get_closest_vector_ix(embeds, predict)]
                     print("%4.2f |  loss: %4.2f" % ((100.0 * iteration) / totalsize,  loss, ))
-                    print("\t%s (%s | %s) " % (in_, out_, decodepredict))
+                    print("\t%s (%s | %s) " % ([ix2vocab[i] for i in in_], ix2vocab[out_], decodepredict))
 
     savedict = model.save_dict()
     savedict.update({"embeds": embeds, 
         "vocab2ix": vocab2ix, 
-        "predictlen":PREDICTLEN,
         "hsize":HSIZE,
         "gsize":GSIZE,
-        "embedsize":EMBEDSIZE})
+        "embedsize":EMBEDSIZE,
+        "sentencelen":SENTENCELEN})
     print("H2Hbias: %s" % (savedict["H2HBIAS"], ))
     torch.save(savedict, "model.pth")
 
@@ -248,7 +240,6 @@ def repl():
     loaddict = torch.load("model.pth")
     embeds = loaddict["embeds"]
     vocab2ix = loaddict["vocab2ix"]
-    PREDICTLEN = loaddict["predictlen"]
     EMBEDSIZE = loaddict["embedsize"] 
     HSIZE = loaddict["hsize"]
     GSIZE = loaddict["gsize"]
@@ -268,9 +259,10 @@ def repl():
             for (w, dist) in closestWordsDesc(ix2vocab, embeds, embeds[vocab2ix[w]]):
                 print ("%20s %4.2f " % (w, dist))
         elif response[0] == "!" and len(response) >= 2:
-            encin_ = get_embedding_matrix(embeds, vocab2ix, response[1:])
-            predict = model.fwd(encin_, PREDICTLEN)
-            decodepredict = [ix2vocab[get_closest_vector_ix(embeds, predict[i])] for i in  range(PREDICTLEN)]
+            # 1(batchsize) x SENTENCELEN  X EMBEDSIZE
+            encin_ = embeds[[vocab2ix[w] for w in response[1:]]]
+            predict = model.fwd(encin_, len(response) - 1)
+            decodepredict = ix2vocab[get_closest_vector_ix(embeds, predict)]
             print(decodepredict)
 
 
