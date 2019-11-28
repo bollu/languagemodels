@@ -48,6 +48,17 @@ class RNN:
             g = torch.tanh(g @ self.G2G + self.G2GBIAS)
         return torch.stack(outs)
 
+    def save_dict(self):
+        return {"H0": self.H0, 
+                "I2H": self.I2H,
+                "H2H":self.H2H, 
+                "H2HBIAS": self.H2HBIAS, 
+                "H2G": self.H2G,
+                "G2G": self.G2G,
+                "G2GBIAS": self.G2GBIAS,
+                "G2O": self.G2O
+                }
+
 # remove the "xx:yy"  from a verse "xx:yy ..." and return the "..."
 def remove_verse_number(s): 
     out = re.split("[0-9]+:[0-9]+", s)
@@ -126,7 +137,7 @@ def get_embedding_matrix(embeds, w2ix, words):
 if __name__ == "__main__":
     SENTENCELEN = 3
     PREDICTLEN = 1
-    NEPOCHS = 3000
+    NEPOCHS = 300
 
     ss, vcount = load_quick_brown_fox()
     vocab = set(vcount)
@@ -170,4 +181,9 @@ if __name__ == "__main__":
                     decodepredict = [ix2vocab[get_closest_vector_ix(embeds, predict[i])] for i in  range(PREDICTLEN)]
                     print("%4.2f |  loss: %4.2f" % (iteration / totalsize * 100.0,  loss, ))
                     print("\t%s (%s | %s) " % (in_, out_, decodepredict))
+
+    savedict = model.save_dict()
+    savedict.update({"embeds": embeds})
+    print("H2Hbias: %s" % (savedict["H2HBIAS"], ))
+    torch.save(savedict, "model.pth")
 
