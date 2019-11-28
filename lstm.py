@@ -4,12 +4,12 @@ from collections import *
 import torch
 import torch.nn as nn
 import torch.optim as optim
+import fire
+from prompt_toolkit import prompt
+
 
 torch.manual_seed(1)
 
-EMBEDSIZE = 5
-HSIZE = 10          
-GSIZE = 10
 
 #                                   o1  o2         on
 #                                G2O^   ^          ^
@@ -17,17 +17,18 @@ GSIZE = 10
 #    I2H^   ^    ^      ^
 #      i1  i2  i3  ... in
 class RNN:
-    def __init__(self):
+    def __init__(self, HSIZE, EMBEDSIZE, GSIZE):
         # hidden stat
         # 1 x HSIZE
         self.H0 = torch.randn((1, HSIZE), requires_grad=True, dtype=torch.float32)
         self.I2H = torch.randn((EMBEDSIZE, HSIZE), requires_grad=True, dtype=torch.float32)
         self.H2H = torch.randn((HSIZE, HSIZE), requires_grad=True, dtype=torch.float32)
-        self.H2HBIAS = torch.randn((1, HSIZE), requires_grad=True, dtype=torch.float32)
         self.H2G = torch.randn((HSIZE, GSIZE), requires_grad=True, dtype=torch.float32)
         self.G2G = torch.randn((GSIZE, GSIZE), requires_grad=True, dtype=torch.float32)
-        self.G2GBIAS = torch.randn((1, GSIZE), requires_grad=True, dtype=torch.float32)
         self.G2O = torch.randn((GSIZE, EMBEDSIZE), requires_grad=True, dtype=torch.float32)
+        self.H2HBIAS = torch.randn((1, HSIZE), requires_grad=True, dtype=torch.float32)
+        self.G2GBIAS = torch.randn((1, GSIZE), requires_grad=True, dtype=torch.float32)
+        self.G2OBIAS = torch.randn((1, EMBEDSIZE), requires_grad=True, dtype=torch.float32)
 
     def get_params(self):
         return [self.H0, self.I2H, self.H2H, self.H2G, self.G2G, self.G2O, self.H2HBIAS, self.G2GBIAS]
@@ -44,7 +45,7 @@ class RNN:
         g = h @ self.H2G
         outs = []
         for i in range(npredict):
-            outs.append(g @ self.G2O)
+            outs.append(torch.tanh(g @ self.G2O + self.G2OBIAS))
             g = torch.tanh(g @ self.G2G + self.G2GBIAS)
         return torch.stack(outs)
 
@@ -52,12 +53,22 @@ class RNN:
         return {"H0": self.H0, 
                 "I2H": self.I2H,
                 "H2H":self.H2H, 
-                "H2HBIAS": self.H2HBIAS, 
                 "H2G": self.H2G,
                 "G2G": self.G2G,
+                "G2O": self.G2O,
+                "H2HBIAS": self.H2HBIAS, 
                 "G2GBIAS": self.G2GBIAS,
-                "G2O": self.G2O
+                "G2OBIAS": self.G2OBIAS
                 }
+    def load_from_dict(self, load):
+        self.H0 = load["H0"]
+        self.I2H = load["I2H"]
+        self.H2H = load["H2H"]
+        self.H2G = load["H2G"]
+        self.G2G = load["G2G"]
+        self.G2O = load["G2O"]
+        self.H2HBIAS = load["H2HBIAS"]
+        self.G2GBIAS = load["G2GBIAS"]
 
 # remove the "xx:yy"  from a verse "xx:yy ..." and return the "..."
 def remove_verse_number(s): 
@@ -134,10 +145,13 @@ def get_embedding_matrix(embeds, w2ix, words):
         out.append(embeds[w2ix[w]])
     return torch.stack(out)
 
-if __name__ == "__main__":
+def train():
     SENTENCELEN = 3
     PREDICTLEN = 1
-    NEPOCHS = 300
+    NEPOCHS = 3000
+    EMBEDSIZE = 5
+    HSIZE = 10          
+    GSIZE = 10
 
     ss, vcount = load_quick_brown_fox()
     vocab = set(vcount)
@@ -147,9 +161,10 @@ if __name__ == "__main__":
     # embeddings, jointly trained with the model
     embeds = torch.randn((vocabsize, EMBEDSIZE), requires_grad=True)
 
-    model = RNN()
+    model = RNN(HSIZE, EMBEDSIZE, GSIZE)
     optimizer = optim.SGD([embeds] + model.get_params(), lr=1e-2)
-    print("number of hyperparameters of model: %s" % calc_num_params(model.get_params()))
+    print("number of hyperparameters of model: %s" % 
+            calc_num_params(model.get_params()))
 
     totalsize = 0
     for s in ss:
@@ -177,13 +192,74 @@ if __name__ == "__main__":
                 loss.backward()
                 optimizer.step()
 
-                if iteration % 1000 == 0:
+                if iteration % 1000 == 3:
                     decodepredict = [ix2vocab[get_closest_vector_ix(embeds, predict[i])] for i in  range(PREDICTLEN)]
                     print("%4.2f |  loss: %4.2f" % (iteration / totalsize * 100.0,  loss, ))
                     print("\t%s (%s | %s) " % (in_, out_, decodepredict))
 
     savedict = model.save_dict()
-    savedict.update({"embeds": embeds})
+    savedict.update({"embeds": embeds, 
+        "vocab2ix": vocab2ix, 
+        "predictlen":PREDICTLEN,
+        "hsize":HSIZE,
+        "gsize":GSIZE,
+        "embedsize":EMBEDSIZE})
     print("H2Hbias: %s" % (savedict["H2HBIAS"], ))
     torch.save(savedict, "model.pth")
+
+
+# returns [(word, dot product of v with embed[word])]
+def closestWordsDesc(ix2vocab, embeds, v):
+    dots = []
+    for i in range(embeds.size()[0]):
+        dots.append((ix2vocab[i], cosine(v, embeds[i])))
+    # sort by cosine similarity (ascending)
+    dots.sort(key=lambda x: x[1])
+    # reverse for descending order
+    dots.reverse()
+    return dots
+
+
+def repl():
+    loaddict = torch.load("model.pth")
+    embeds = loaddict["embeds"]
+    vocab2ix = loaddict["vocab2ix"]
+    PREDICTLEN = loaddict["predictlen"]
+    EMBEDSIZE = loaddict["embedsize"] 
+    HSIZE = loaddict["hsize"]
+    GSIZE = loaddict["gsize"]
+    ix2vocab = dict([(ix, w) for (w, ix) in vocab2ix.items()])
+
+    model = RNN(HSIZE, EMBEDSIZE, GSIZE)
+    model.load_from_dict(loaddict)
+
+    while True:
+        response = prompt(">")
+        if not response: continue
+        response = response.split(" ")
+        if response[0] == "~" and len(response) == 2:
+            w = response[1]
+            if w not in vocab2ix: pass
+
+            for (w, dist) in closestWordsDesc(ix2vocab, embeds, embeds[vocab2ix[w]]):
+                print ("%20s %4.2f " % (w, dist))
+        elif response[0] == "!" and len(response) >= 2:
+            encin_ = get_embedding_matrix(embeds, vocab2ix, response[1:])
+            predict = model.fwd(encin_, PREDICTLEN)
+            decodepredict = [ix2vocab[get_closest_vector_ix(embeds, predict[i])] for i in  range(PREDICTLEN)]
+            print(decodepredict)
+
+
+
+class CLI:
+    def train(self):
+        train()
+    def repl(self):
+        repl()
+
+
+if __name__ == "__main__":
+    fire.Fire(CLI)
+    
+
 
