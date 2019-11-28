@@ -1,4 +1,4 @@
-#!/usr/bin/env python3
+#!/usr/bin/env python2
 import re
 from collections import *
 import torch
@@ -43,7 +43,7 @@ class RNN:
 
     def get_params(self):
         return [self.H0, self.I2H, self.H2H, self.H2G, 
-                self.G2G, self.G2O, self.H2HBIAS, self.G2GBIAS, self.G2OBIAS]
+                self.G2G, self.G2O, self.H2HBIAS, self.G2GBIAS] #, self.G2OBIAS]
 
     # predict next words
     # inputs: SENTENCELEN x EMBEDSIZE
@@ -170,7 +170,7 @@ def get_embedding_matrix(embeds, w2ix, words):
 
 def train():
     SENTENCELEN = 3
-    PREDICTLEN = 2
+    PREDICTLEN = 1
     NEPOCHS = 3000
     EMBEDSIZE = 10
     HSIZE = 10          
@@ -182,8 +182,8 @@ def train():
     ix2vocab = dict([(ix, w) for (w, ix) in vocab2ix.items()])
     vocabsize = len(vocab)
     # embeddings, jointly trained with the model
-    embeds = torch.empty((vocabsize, EMBEDSIZE), device=device).uniform_(-0.5/EMBEDSIZE, 0.5/EMBEDSIZE)
-    embeds.requires_grad_()
+    # embeds = torch.empty((vocabsize, EMBEDSIZE), device=device).uniform_(-0.5/EMBEDSIZE, 0.5/EMBEDSIZE)
+    embeds = torch.randn((vocabsize, EMBEDSIZE), device=device, requires_grad=True)
 
     model = RNN(HSIZE, EMBEDSIZE, GSIZE)
     optimizer = optim.SGD([embeds] + model.get_params(), lr=1e-2)
