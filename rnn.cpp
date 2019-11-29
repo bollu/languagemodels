@@ -24,6 +24,13 @@ static const long MAX_SENTENCE_LEN = 1e2;
 int ss[MAX_SENTENCES][MAX_SENTENCE_LEN];
 vector<vector<int> > sentences;
 
+int unifylen(int l1, int l2) {
+    if (l1 == -1) return l2;
+    if (l2 == -1) return l1;
+    assert(l1 == l2);
+    return l1;
+}
+
 // only 1D arrays
 struct Arr {
     float *data = nullptr;
@@ -51,18 +58,30 @@ struct Arr {
 };
 
 enum class ExprType {
-    Add, Dot, Matmul, Negate, Div, Tanh, Sigmoid, Arr, Undef
+    Add, 
+    Dot, 
+    Matmul, 
+    PointwiseMul,
+    Negate, 
+    Div, 
+    Tanh, 
+    Sigmoid, 
+    Arr, 
+    Undef, 
+    AllOnes, 
+    AllZeros
 };
 
 struct Expr {
     ExprType ty = ExprType::Undef;
     Arr val;
+    // if it's a virtual node such as AllZeros, AllOnes, this will be its length. eg. AllZeros, AllOnes
+    int virtual_len;
+
     Expr *args[10] = { nullptr };
     int npred = 0;
     int nargs = 0;
     Expr *pred[10] = { nullptr };
-    // gradients for all predecessors
-    Arr *grad[10] = { nullptr };
 
     void addarg(Expr *e) {
         assert(nargs < 10);
@@ -85,8 +104,19 @@ struct Expr {
         e->ty = ExprType::Add;
         e->addarg(this); 
         e->addarg(other);
-        assert(this->len() == other->len());
-        e->val = Arr(this->len(), e->get_name());
+        const int len = unifylen(this->len(), other->len());
+        cout << this->get_name() << " + " << other->get_name();
+        cout << "LEN: " << len << "\n";
+        e->val = Arr(len, e->get_name());
+        return e;
+    }
+
+    static Expr *pointwisemul(Expr *l,  Expr *r) {
+        Expr *e = new Expr;
+        e->ty = ExprType::PointwiseMul;
+        assert(unifylen(l->len(), r->len()));
+        e->addarg(l);
+        e->addarg(r);
         return e;
     }
 
@@ -107,10 +137,41 @@ struct Expr {
         e->val = Arr(1, e->get_name());
         return e;
     }
+
+    Expr *allones(int len) {
+        Expr *e = new Expr;
+        e->ty = ExprType::AllOnes;
+        e->virtual_len = len;
+        return e;
+    }
+
+
+    Expr *allzeros(int len) {
+        Expr *e = new Expr;
+        e->ty = ExprType::AllZeros;
+        e->virtual_len = len;
+        return e;
+    }
+
+    // return the expression for the gradient with the other array
+    Expr *grad(string name) {
+        switch(ty) {
+            case ExprType::Arr:  {
+                return val.name == name ? 
+                    Expr::allones(len()) : Expr::allzeros(len());
+             }
+            case ExprType::Add:
+                return args[0]->grad(name)->add(args[1]->grad(name));
+            case ExprType::Dot:
+                return Expr::pointwisemul(args[0]->grad(name), args[1])->add(Expr::pointwisemul(args[0], args[1]->grad(name)));
+            default: assert(false && "unimplemented");
+        }
+    }
     
     void force() {
         switch(ty) {
             case ExprType::Arr: return;
+            case ExprType::AllOnes: return;
             case ExprType::Add:
                     args[0]->force();
                     args[1]->force();
@@ -126,21 +187,35 @@ struct Expr {
                         val[0] += args[0]->at(i) * args[1]->at(i);
                     }
                     return;
+            case ExprType::PointwiseMul:
+                    args[0]->force();
+                    args[1]->force();
+                    for(int i = 0; i < args[0]->len(); ++i) {
+                        val[i] = args[0]->at(i) * args[1]->at(i);
+                    }
 
             default: assert(false && "unhandled"); 
         }
     }
 
-    float &operator[] (int ix) {
-        return val[ix];
+    float at(int ix) { 
+        switch(ty) {
+            case ExprType::AllOnes:
+                return 1;
+            case ExprType::AllZeros:
+                return 0;
+            default:
+                return val[ix];
+        }
     }
-
-    float &at(int ix) { return val[ix]; }
 
     int len() {
         switch(ty) {
             case ExprType::Arr: return val.len;
-            case ExprType::Add: return args[0]->len();
+            case ExprType::AllOnes: return virtual_len;
+            case ExprType::AllZeros: return virtual_len;
+            case ExprType::Add: return unifylen(args[0]->len(), args[1]->len());
+            case ExprType::PointwiseMul: return unifylen(args[0]->len(), args[1]->len());
             default:
                 assert (false && "unhandled");
         }
@@ -150,12 +225,18 @@ struct Expr {
     string get_name() {
         switch(ty) {
             case ExprType::Arr: return val.name;
+            case ExprType::AllOnes: return "11..1";
+            case ExprType::AllZeros: return "00..0";
             case ExprType::Add: 
                 return "(+ " + args[0]->get_name() + " " + 
                         args[1]->get_name() + ")";
 
             case ExprType::Dot: 
                 return "(dot " + args[0]->get_name() + " " + 
+                        args[1]->get_name() + ")";
+
+            case ExprType::PointwiseMul: 
+                return "(.* " + args[0]->get_name() + " " + 
                         args[1]->get_name() + ")";
             default:
                 assert(false && "unrechable");
@@ -190,6 +271,10 @@ void use_expr() {
 
     cout << "\n";
     dot->val.print_data();
+
+    Expr *dotder = dot->grad("b");
+    cout << "grad of dot wrt b:";
+    cout << ": " << dotder->get_name();
 
 }
 

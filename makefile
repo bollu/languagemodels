@@ -1,2 +1,2 @@
 rnn: rnn.cpp
-	nvcc -g rnn.cpp -o rnn -std=c++11
+	nvcc -g -O0 rnn.cpp -o rnn -std=c++11
