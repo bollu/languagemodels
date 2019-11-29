@@ -11,6 +11,8 @@
 #include <string.h>
 
 using namespace std;
+using Dim = int;
+using DimSize = int;
 
 int last_word_index = 0;
 set<string> vocab;
@@ -28,12 +30,18 @@ vector<vector<int> > sentences;
 struct Shape {
     static const int MAXDIM = 10;
     int ndim = 0;
-    int vals[Shape::MAXDIM];
+    DimSize vals[Shape::MAXDIM];
 
     int nelem() {
         int n = 1;
         for(int i = 0; i < ndim; ++i) n *= vals[i];
         return n;
+    }
+
+    int operator [](int dim) {
+        assert(dim >= 0);
+        assert(dim < ndim);
+        return vals[dim];
     }
 
     static Shape unify(Shape sh1, Shape sh2) {
@@ -45,6 +53,14 @@ struct Shape {
         Shape sh;
         sh.ndim = 1;
         sh.vals[0] = n;
+        return sh;
+    }
+
+    static Shape twod(int n, int m) {
+        Shape sh;
+        sh.ndim = 2;
+        sh.vals[0] = n;
+        sh.vals[1] = m;
         return sh;
     }
 
@@ -70,11 +86,11 @@ struct Arr {
         };
 
     Arr (int n, string name) : 
-        sh(Shape::oned(n)), data(new float[n]), name(name) {
-        };
+        sh(Shape::oned(n)), data(new float[n]), name(name) {};
+    Arr (int n, int m, string name) :
+        sh(Shape::twod(n, m)), data(new float[n*m]), name(name) {};
 
-    float & operator [](int ix) {
-        cout << name << "[" << ix << "]\n";
+    float &operator [](int ix) {
         assert(ix < sh.nelem());
         assert(ix >= 0);
         return data[ix];
@@ -94,10 +110,6 @@ enum class ExprType {
     Dot, 
     Matmul, 
     PointwiseMul,
-    Negate, 
-    Div, 
-    Tanh, 
-    Sigmoid, 
     Arr, 
     Undef, 
     AllOnes, 
@@ -109,6 +121,10 @@ struct Expr {
     Arr val;
     // if it's a virtual node such as AllZeros, AllOnes, this will be its length. eg. AllZeros, AllOnes
     Shape virtual_sh;
+
+    // dimension to contract along for Contraction
+    // TODO: break this up using subclassing.
+    Dim contractdiml, contractdimr;
 
     Expr *args[10] = { nullptr };
     int npred = 0;
@@ -131,12 +147,12 @@ struct Expr {
         return e;
     }
 
-    Expr *add(Expr *other) {
+    static Expr* add(Expr *l, Expr *r) {
         Expr *e = new Expr;
         e->ty = ExprType::Add;
-        e->addarg(this); 
-        e->addarg(other);
-        e->val = Arr(Shape::unify(this->len(), other->len()), e->to_str());
+        e->addarg(l); 
+        e->addarg(r);
+        e->val = Arr(Shape::unify(l->sh(), r->sh()), e->to_str());
         return e;
     }
 
@@ -148,21 +164,22 @@ struct Expr {
         return e;
     }
 
-    Expr *matmul(Expr *other) {
+    static Expr *matmul(Expr *l, Expr *r) {
         Expr *e = new Expr;
         e->ty = ExprType::Matmul;
-        e->addarg(this); 
-        e->addarg(other);
+        e->addarg(l);
+        e->addarg(r);
         return e;
+
     }
 
-    Expr *dot(Expr *other) {
+    static Expr *dot(Expr *l, Expr *r) {
         Expr *e = new Expr;
         e->ty = ExprType::Dot;
-        e->addarg(this); 
-        e->addarg(other);
+        e->addarg(l); 
+        e->addarg(r);
 
-        // assert(this->len() == other->len());
+        // assert(this->sh() == other->sh());
         e->val = Arr(1, e->to_str());
         return e;
     }
@@ -187,12 +204,13 @@ struct Expr {
         switch(ty) {
             case ExprType::Arr:  {
                 return val.name == name ? 
-                    Expr::allones(len()) : Expr::allzeros(len());
+                    Expr::allones(sh()) : Expr::allzeros(sh());
              }
             case ExprType::Add:
-                return args[0]->grad(name)->add(args[1]->grad(name));
+                return Expr::add(args[0]->grad(name), args[1]->grad(name));
             case ExprType::Dot:
-                return Expr::pointwisemul(args[0]->grad(name), args[1])->add(Expr::pointwisemul(args[0], args[1]->grad(name)));
+                return Expr::add(Expr::pointwisemul(args[0]->grad(name), args[1]),
+                        Expr::pointwisemul(args[0], args[1]->grad(name)));
             default: assert(false && "unimplemented");
         }
     }
@@ -201,32 +219,55 @@ struct Expr {
         switch(ty) {
             case ExprType::Arr: return;
             case ExprType::AllOnes: return;
-            case ExprType::Add:
+            case ExprType::Add: {
                     args[0]->force();
                     args[1]->force();
-                for(int i = 0; i < args[0]->len().nelem(); ++i) {
+                for(int i = 0; i < args[0]->sh().nelem(); ++i) {
                     val[i] = args[0]->at(i) + args[1]->at(i);
                 }
                 return;
+            }
             case ExprType::Dot:
                     args[0]->force();
                     args[1]->force();
                     val[0] = 0;
-                    assert(args[0]->len().ndim == 1);
-                    assert(args[1]->len().ndim == 1);
+                    assert(args[0]->sh().ndim == 1);
+                    assert(args[1]->sh().ndim == 1);
 
-                    for(int i = 0; i < args[0]->len().nelem(); ++i) {
+                    for(int i = 0; i < args[0]->sh().nelem(); ++i) {
                         val[0] += args[0]->at(i) * args[1]->at(i);
                     }
                     return;
             case ExprType::PointwiseMul:
                     args[0]->force();
                     args[1]->force();
-                    for(int i = 0; i < args[0]->len().nelem(); ++i) {
+                    for(int i = 0; i < args[0]->sh().nelem(); ++i) {
                             val[i] = args[0]->at(i) * args[1]->at(i);
                     }
+                    return;
 
-            default: assert(false && "unhandled"); 
+            case ExprType::Matmul: {
+                    args[0]->force();
+                    args[1]->force();
+
+                    int M = args[0]->sh()[0];
+                    int N = args[0]->sh()[1];
+                    assert(N == args[1]->sh()[0]);
+                    int O = args[1]->sh()[1];
+
+                    for(int i = 0; i < M; ++i) {
+                        for(int j = 0; j < O; ++j) {
+                            val[i*M+j] = 0;
+                            for(int k = 0; k < N; ++k ) {
+                                val[i*M+j] += args[0]->at(i*M+k) * args[1]->at(k*M+j);
+                            }
+
+                        }
+                    }
+                    return;
+           }
+
+            default: cerr << to_str(); assert(false && "unhandled"); 
         }
     }
 
@@ -241,13 +282,13 @@ struct Expr {
         }
     }
 
-    Shape len() {
+    Shape sh() {
         switch(ty) {
             case ExprType::Arr: return val.sh;
             case ExprType::AllOnes: return virtual_sh;
             case ExprType::AllZeros: return virtual_sh;
-            case ExprType::Add: return Shape::unify(args[0]->len(), args[1]->len());
-            case ExprType::PointwiseMul: return Shape::unify(args[0]->len(), args[1]->len());
+            case ExprType::Add: return Shape::unify(args[0]->sh(), args[1]->sh());
+            case ExprType::PointwiseMul: return Shape::unify(args[0]->sh(), args[1]->sh());
             default:
                 assert (false && "unhandled");
         }
@@ -270,6 +311,10 @@ struct Expr {
             case ExprType::PointwiseMul: 
                 return "(.* " + args[0]->to_str() + " " + 
                         args[1]->to_str() + ")";
+
+            case ExprType::Matmul: 
+                return "(@ " + args[0]->to_str() + " " + 
+                        args[1]->to_str() + ")";
             default:
                 assert(false && "unrechable");
 
@@ -278,8 +323,9 @@ struct Expr {
     
 };
 
-void use_expr() {
-    const int N  = 3;
+void use_expr() { 
+    {
+    const int N = 3;
     Arr arra = Arr(N, "a");
     Arr arrb = Arr(N, "b");
     for(int i = 0; i < N; ++i) arra[i] = i;
@@ -287,26 +333,46 @@ void use_expr() {
     Expr *a = Expr::arr(arra);
     Expr *b = Expr::arr(arrb);
 
-    Expr *add = a->add(b);
-    Expr *dot = b->dot(add);
+    Expr *add = Expr::add(a, b);
+    Expr *dot = Expr::dot(add, b);
     cout << dot->to_str();
 
     // force this thunk.
-    cout << "\n";
     dot->force();
 
-    arra.print_data();
-    cout << "\n";
-    arrb.print_data();
-    cout << "\n";
-    add->val.print_data();
+    cout << "arra:\n"; arra.print_data();
+    cout << "\narrb:"; arrb.print_data();
+    cout << "\nadd:"; add->val.print_data();
 
-    cout << "\n";
-    dot->val.print_data();
+    cout << "\ndot: "; cout << dot->to_str();
+    cout << "\ndot: "; dot->val.print_data();
 
     Expr *dotder = dot->grad("b");
     cout << "grad of dot wrt b:";
     cout << ": " << dotder->to_str();
+    }
+    /*
+
+    {
+
+        const int M = 2;
+        const int N = 3;
+        const int O = 4;
+        Arr arra = Arr(M, N, "a");
+        Arr arrb = Arr(N, O, "b");
+        for(int i = 0; i < M; ++i) 
+            for(int j = 0; j < N; ++j)
+                arra[i*M+j] = i;
+        for(int i = 0; i < N; ++i) 
+            for(int j = 0; j < O; ++j) 
+                arrb[i*N+j] = i == j ? 1 : 0;
+
+        Expr *a = Expr::arr(arra);
+        Expr *b = Expr::arr(arrb);
+
+        Expr *dot = Expr::matmul(a, b);
+        cout << dot->to_str();
+    } */
 
 }
 
