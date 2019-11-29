@@ -45,6 +45,14 @@ struct Shape {
         return vals[dim];
     }
 
+    bool operator == (const Shape &other) const {
+        if (ndim != other.ndim) return false;
+        for(int i = 0; i < ndim; ++i) {
+            if(vals[i] != other.vals[i]) return false;
+        }
+        return true;
+    }
+
     static Shape unify(Shape sh1, Shape sh2) {
         assert(sh1.ndim == sh2.ndim);
         return sh1;
@@ -82,6 +90,7 @@ struct Arr {
     std::string name = "undef";
 
     Arr() = default;
+    Arr(const Arr &other) = default;
     Arr (Shape sh, string name) : 
         sh(sh), data(new float[sh.nelem()]), name(name) {
         };
@@ -141,6 +150,7 @@ struct Expr {
     }
 
     Expr() = default;
+    Expr(const Expr &other) = default;
 
     static Expr *arr(Arr a) {
         Expr *e = new Expr;
@@ -252,7 +262,7 @@ struct Expr {
                         Expr::pointwisemul(args[0], args[1]->grad(dx)));
             // (1 - tanh^2 X) .* X'
             case ExprType::Tanh: {
-                Expr *dtan = Expr::sub(Expr::allones(sh()), Expr::pointwisemul(this, this));
+                Expr *dtan = Expr::sub(Expr::allones(sh()), Expr::pointwisemul(new Expr(*this), new Expr(*this)));
                 // derivative of the inner computation
                 Expr *dinner = args[0]->grad(dx);
                 return Expr::pointwisemul(dtan, dinner);
@@ -465,16 +475,48 @@ Expr *constantfold(Expr *e) {
             }
             return Expr::pointwisemul(constantfold(e->args[0]), constantfold(e->args[1]));
 
+        case ExprType::MatVecMul:
+            if (e->args[0]->ty == ExprType::AllZeros || 
+                    e->args[1]->ty == ExprType::AllZeros) {
+                return Expr::allzeros(e->sh());
+            }
+            if (e->args[0]->ty == ExprType::AllOnes) {
+                return constantfold(e->args[1]);
+            }
+            if (e->args[1]->ty == ExprType::AllOnes) {
+                return constantfold(e->args[0]);
+            }
+            return Expr::matvecmul(constantfold(e->args[0]), constantfold(e->args[1]));
+
+
+
         case ExprType::Add:
             if(e->args[0]->ty == ExprType::AllZeros && 
                     e->args[1]->ty == ExprType::AllOnes) {
                 return Expr::allones(e->sh());
             }
-            if(e->args[1]->ty == ExprType::AllZeros && 
-                    e->args[0]->ty == ExprType::AllOnes) {
-                return Expr::allones(e->sh());
+            if(e->args[0]->ty == ExprType::AllZeros) {
+                return constantfold(e->args[1]);
+            }
+            if(e->args[1]->ty == ExprType::AllZeros) {
+                return constantfold(e->args[0]);
             }
             return Expr::add(constantfold(e->args[0]), constantfold(e->args[1]));
+
+        case ExprType::Replicate:
+            if (e->args[0]->sh() == e->virtual_sh) {
+                return constantfold(e->args[0]);
+            } 
+            else if (e->args[0]->ty == ExprType::AllOnes) {
+                return Expr::allones(e->virtual_sh);
+            }
+            else if (e->args[0]->ty == ExprType::AllZeros) {
+                return Expr::allzeros(e->virtual_sh);
+            }
+            else {
+                return Expr::replicate(constantfold(e->args[0]), e->virtual_sh);
+            }
+
 
         default: return e;
     }
@@ -532,8 +574,19 @@ void use_expr() {
         Expr *tanhv = Expr::tanh(v);
         Expr *dot = Expr::matvecmul(m, tanhv);
         cout << "\ndot:" << dot->to_str();
-        cout << "\ndot->grad[m]:" << dot->grad(arrm)->to_str();
-        cout << "\ndot->grad[v]:" << dot->grad(arrv)->to_str();
+
+        Expr *dot_grad_m = dot->grad(arrm);
+        for(int i = 0; i < 6; ++i) {
+            cout << "\n" << i << "|dot->grad[m]:" << dot_grad_m->to_str();
+            dot_grad_m = constantfold(dot_grad_m);
+        }
+
+        cout << "\n\n";
+        Expr *dot_grad_v = dot->grad(arrv);
+        for(int i = 0; i < 6; ++i) {
+        cout << "\n" << i << "| dot->grad[v]:" << dot_grad_v->to_str();
+            dot_grad_v = constantfold(dot_grad_v);
+        }
         // cout << "\ndot der wrt a:" << dot->grad("b");
     }
 
