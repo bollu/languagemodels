@@ -9,6 +9,7 @@
 #include <assert.h>
 #include <stdlib.h>
 #include <string.h>
+#include <math.h>
 
 using namespace std;
 using Dim = int;
@@ -67,7 +68,7 @@ struct Shape {
     string to_str() {
         string s =  "sh[";
         for(int i = 0; i < ndim; ++i) {
-            s += vals[i] + (i < ndim - 1 ? " " : "");
+            s += to_string(vals[i]) + (i < ndim - 1 ? " " : "");
         }
         s += "]";
         return s;
@@ -106,10 +107,14 @@ struct Arr {
 };
 
 enum class ExprType {
-    Add, 
+    Add,
+    Sub,
     Dot, 
-    Matmul, 
+    MatMatMul, 
+    MatVecMul,
+    Replicate,
     PointwiseMul,
+    Tanh,
     Arr, 
     Undef, 
     AllOnes, 
@@ -122,9 +127,6 @@ struct Expr {
     // if it's a virtual node such as AllZeros, AllOnes, this will be its length. eg. AllZeros, AllOnes
     Shape virtual_sh;
 
-    // dimension to contract along for Contraction
-    // TODO: break this up using subclassing.
-    Dim contractdiml, contractdimr;
 
     Expr *args[10] = { nullptr };
     int npred = 0;
@@ -156,6 +158,15 @@ struct Expr {
         return e;
     }
 
+    static Expr* sub(Expr *l, Expr *r) {
+        Expr *e = new Expr;
+        e->ty = ExprType::Sub;
+        e->addarg(l); 
+        e->addarg(r);
+        e->val = Arr(Shape::unify(l->sh(), r->sh()), e->to_str());
+        return e;
+    }
+
     static Expr *pointwisemul(Expr *l,  Expr *r) {
         Expr *e = new Expr;
         e->ty = ExprType::PointwiseMul;
@@ -164,14 +175,35 @@ struct Expr {
         return e;
     }
 
-    static Expr *matmul(Expr *l, Expr *r) {
+    static Expr *matmatmul(Expr *l, Expr *r) {
         Expr *e = new Expr;
-        e->ty = ExprType::Matmul;
+        e->ty = ExprType::MatMatMul;
         e->addarg(l);
         e->addarg(r);
         return e;
 
     }
+
+    static Expr *matvecmul(Expr *l, Expr *r) {
+        Expr *e = new Expr;
+        e->ty = ExprType::MatVecMul;
+        e->addarg(l);
+        assert(l->sh().ndim == 2);
+        assert(r->sh().ndim == 1);
+        e->addarg(r);
+        return e;
+
+    }
+
+    static Expr *replicate(Expr *inner, Shape replicatesh) {
+        Expr *e = new Expr;
+        e->ty = ExprType::Replicate;
+        e->addarg(inner);
+        // the new shape is that of the shape we want to replicate to
+        e->virtual_sh = replicatesh;
+        return e;
+    }
+
 
     static Expr *dot(Expr *l, Expr *r) {
         Expr *e = new Expr;
@@ -184,7 +216,14 @@ struct Expr {
         return e;
     }
 
-    Expr *allones(Shape sh) {
+    static Expr *tanh(Expr *inner) {
+        Expr *e = new Expr;
+        e->ty = ExprType::Tanh;
+        e->addarg(inner);
+        return e;
+    }
+
+    static Expr *allones(Shape sh) {
         Expr *e = new Expr;
         e->ty = ExprType::AllOnes;
         e->virtual_sh = sh;
@@ -192,7 +231,7 @@ struct Expr {
     }
 
 
-    Expr *allzeros(Shape sh) {
+    static Expr *allzeros(Shape sh) {
         Expr *e = new Expr;
         e->ty = ExprType::AllZeros;
         e->virtual_sh = sh;
@@ -200,17 +239,37 @@ struct Expr {
     }
 
     // return the expression for the gradient with the other array
-    Expr *grad(string name) {
+    Expr *grad(Arr dx) {
         switch(ty) {
             case ExprType::Arr:  {
-                return val.name == name ? 
+                return val.name == dx.name ? 
                     Expr::allones(sh()) : Expr::allzeros(sh());
              }
             case ExprType::Add:
-                return Expr::add(args[0]->grad(name), args[1]->grad(name));
+                return Expr::add(args[0]->grad(dx), args[1]->grad(dx));
             case ExprType::Dot:
-                return Expr::add(Expr::pointwisemul(args[0]->grad(name), args[1]),
-                        Expr::pointwisemul(args[0], args[1]->grad(name)));
+                return Expr::add(Expr::pointwisemul(args[0]->grad(dx), args[1]),
+                        Expr::pointwisemul(args[0], args[1]->grad(dx)));
+            // (1 - tanh^2 X) .* X'
+            case ExprType::Tanh: {
+                Expr *dtan = Expr::sub(Expr::allones(sh()), Expr::pointwisemul(this, this));
+                // derivative of the inner computation
+                Expr *dinner = args[0]->grad(dx);
+                return Expr::pointwisemul(dtan, dinner);
+             }
+            case ExprType::MatMatMul: {
+                    assert(false && "need to implement replicate");
+                   return Expr::add(Expr::matmatmul(args[0]->grad(dx), args[1]),
+                           Expr::matmatmul(args[0], args[1]->grad(dx)));
+
+               }
+            case ExprType::MatVecMul: {
+                   // TODO!! What is the justification for the "fit shape"??
+                   // (d/dN(M x) = M [dx/dN] + [dM/dy]
+                   return Expr::add(
+                           Expr::replicate(Expr::matvecmul(args[0]->grad(dx), args[1]), dx.sh),
+                           Expr::replicate(Expr::matvecmul(args[0], args[1]->grad(dx)), dx.sh)) ;
+               }
             default: assert(false && "unimplemented");
         }
     }
@@ -224,6 +283,14 @@ struct Expr {
                     args[1]->force();
                 for(int i = 0; i < args[0]->sh().nelem(); ++i) {
                     val[i] = args[0]->at(i) + args[1]->at(i);
+                }
+                return;
+            }
+            case ExprType::Sub: {
+                    args[0]->force();
+                    args[1]->force();
+                for(int i = 0; i < args[0]->sh().nelem(); ++i) {
+                    val[i] = args[0]->at(i) - args[1]->at(i);
                 }
                 return;
             }
@@ -246,7 +313,14 @@ struct Expr {
                     }
                     return;
 
-            case ExprType::Matmul: {
+            case ExprType::Tanh: 
+                    args[0]->force();
+                    for(int i = 0; i < args[0]->sh().nelem(); ++i) {
+                        val[i] = tanhf(args[0]->at(i));
+                    }
+
+
+            case ExprType::MatMatMul: {
                     args[0]->force();
                     args[1]->force();
 
@@ -259,10 +333,28 @@ struct Expr {
                         for(int j = 0; j < O; ++j) {
                             val[i*M+j] = 0;
                             for(int k = 0; k < N; ++k ) {
-                                val[i*M+j] += args[0]->at(i*M+k) * args[1]->at(k*M+j);
+                                val[i*M+j] += args[0]->at(i*N+k) * args[1]->at(k*M+j);
                             }
 
                         }
+                    }
+                    return;
+           }
+
+            case ExprType::MatVecMul: {
+                    args[0]->force();
+                    args[1]->force();
+
+                    int M = args[0]->sh()[0];
+                    int N = args[0]->sh()[1];
+                    assert(N == args[1]->sh()[0]);
+
+                    for(int i = 0; i < M; ++i) {
+                        val[i] = 0;
+                        for(int j = 0; j < N; ++j) {
+                                val[j] += args[0]->at(i*N+j) * args[1]->at(j);
+                            }
+
                     }
                     return;
            }
@@ -277,6 +369,11 @@ struct Expr {
                 return 1;
             case ExprType::AllZeros:
                 return 0;
+            case ExprType::Replicate:
+                // find the value of the index wrt the replication
+                // a[i, j, k] -> a[i]
+                return args[0]->at(ix % args[0]->sh().nelem());
+
             default:
                 return val[ix];
         }
@@ -287,8 +384,13 @@ struct Expr {
             case ExprType::Arr: return val.sh;
             case ExprType::AllOnes: return virtual_sh;
             case ExprType::AllZeros: return virtual_sh;
+            case ExprType::Tanh: return args[0]->sh();
+            case ExprType::Replicate: return virtual_sh;
             case ExprType::Add: return Shape::unify(args[0]->sh(), args[1]->sh());
+            case ExprType::Sub: return Shape::unify(args[0]->sh(), args[1]->sh());
             case ExprType::PointwiseMul: return Shape::unify(args[0]->sh(), args[1]->sh());
+            case ExprType::MatMatMul: return args[0]->sh();
+            case ExprType::MatVecMul: return args[1]->sh();
             default:
                 assert (false && "unhandled");
         }
@@ -304,17 +406,32 @@ struct Expr {
                 return "(+ " + args[0]->to_str() + " " + 
                         args[1]->to_str() + ")";
 
+            case ExprType::Sub: 
+                return "(- " + args[0]->to_str() + " " + 
+                        args[1]->to_str() + ")";
+
             case ExprType::Dot: 
                 return "(dot " + args[0]->to_str() + " " + 
                         args[1]->to_str() + ")";
+
+            case ExprType::Tanh:
+                return "(tanh " + args[0]->to_str() + ")";
 
             case ExprType::PointwiseMul: 
                 return "(.* " + args[0]->to_str() + " " + 
                         args[1]->to_str() + ")";
 
-            case ExprType::Matmul: 
-                return "(@ " + args[0]->to_str() + " " + 
+            case ExprType::MatMatMul: 
+                return "(@mm " + args[0]->to_str() + " " + 
                         args[1]->to_str() + ")";
+
+            case ExprType::MatVecMul: 
+                return "(@mv " + args[0]->to_str() + " " + 
+                        args[1]->to_str() + ")";
+
+            case ExprType::Replicate: 
+                return "(replicate " + virtual_sh.to_str() + " " + 
+                    args[0]->to_str()+ ")";
             default:
                 assert(false && "unrechable");
 
@@ -322,6 +439,46 @@ struct Expr {
     }
     
 };
+
+bool isexprconstant(const Expr *e) {
+    switch(e->ty) {
+        case ExprType::AllOnes:
+        case ExprType::AllZeros:
+            return true;
+        default: return false;
+    }
+}
+
+// move all constants to the left. If both params are constants, then fold
+Expr *constantfold(Expr *e) {
+    switch(e->ty) {
+        case ExprType::PointwiseMul:
+            if (e->args[0]->ty == ExprType::AllZeros || 
+                    e->args[1]->ty == ExprType::AllZeros) {
+                return Expr::allzeros(e->sh());
+            }
+            if (e->args[0]->ty == ExprType::AllOnes) {
+                return constantfold(e->args[1]);
+            }
+            if (e->args[1]->ty == ExprType::AllOnes) {
+                return constantfold(e->args[0]);
+            }
+            return Expr::pointwisemul(constantfold(e->args[0]), constantfold(e->args[1]));
+
+        case ExprType::Add:
+            if(e->args[0]->ty == ExprType::AllZeros && 
+                    e->args[1]->ty == ExprType::AllOnes) {
+                return Expr::allones(e->sh());
+            }
+            if(e->args[1]->ty == ExprType::AllZeros && 
+                    e->args[0]->ty == ExprType::AllOnes) {
+                return Expr::allones(e->sh());
+            }
+            return Expr::add(constantfold(e->args[0]), constantfold(e->args[1]));
+
+        default: return e;
+    }
+}
 
 void use_expr() { 
     {
@@ -347,32 +504,38 @@ void use_expr() {
     cout << "\ndot: "; cout << dot->to_str();
     cout << "\ndot: "; dot->val.print_data();
 
-    Expr *dotder = dot->grad("b");
+    Expr *dotder = dot->grad(arrb);
     cout << "grad of dot wrt b:";
     cout << ": " << dotder->to_str();
+
+    for(int i = 0; i < 3; ++i) {
+        dotder = constantfold(dotder);
     }
-    /*
+
+    cout << " | simpl " << dotder->to_str();
+    }
 
     {
 
-        const int M = 2;
+        const int M = 3;
         const int N = 3;
-        const int O = 4;
-        Arr arra = Arr(M, N, "a");
-        Arr arrb = Arr(N, O, "b");
+        Arr arrm= Arr(M, N, "m");
+        Arr arrv = Arr(N, "v");
         for(int i = 0; i < M; ++i) 
             for(int j = 0; j < N; ++j)
-                arra[i*M+j] = i;
-        for(int i = 0; i < N; ++i) 
-            for(int j = 0; j < O; ++j) 
-                arrb[i*N+j] = i == j ? 1 : 0;
+                arrm[i*M+j] = i == j ? 1 : 0;
+        for(int i = 0; i < N; ++i) arrv[i] = i;
 
-        Expr *a = Expr::arr(arra);
-        Expr *b = Expr::arr(arrb);
+        Expr *m = Expr::arr(arrm);
+        Expr *v = Expr::arr(arrv);
 
-        Expr *dot = Expr::matmul(a, b);
-        cout << dot->to_str();
-    } */
+        Expr *tanhv = Expr::tanh(v);
+        Expr *dot = Expr::matvecmul(m, tanhv);
+        cout << "\ndot:" << dot->to_str();
+        cout << "\ndot->grad[m]:" << dot->grad(arrm)->to_str();
+        cout << "\ndot->grad[v]:" << dot->grad(arrv)->to_str();
+        // cout << "\ndot der wrt a:" << dot->grad("b");
+    }
 
 }
 
