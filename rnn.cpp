@@ -24,34 +24,66 @@ static const long MAX_SENTENCE_LEN = 1e2;
 int ss[MAX_SENTENCES][MAX_SENTENCE_LEN];
 vector<vector<int> > sentences;
 
-int unifylen(int l1, int l2) {
-    if (l1 == -1) return l2;
-    if (l2 == -1) return l1;
-    assert(l1 == l2);
-    return l1;
-}
+
+struct Shape {
+    static const int MAXDIM = 10;
+    int ndim = 0;
+    int vals[Shape::MAXDIM];
+
+    int nelem() {
+        int n = 1;
+        for(int i = 0; i < ndim; ++i) n *= vals[i];
+        return n;
+    }
+
+    static Shape unify(Shape sh1, Shape sh2) {
+        assert(sh1.ndim == sh2.ndim);
+        return sh1;
+    }
+
+    static Shape oned(int n) {
+        Shape sh;
+        sh.ndim = 1;
+        sh.vals[0] = n;
+        return sh;
+    }
+
+    string to_str() {
+        string s =  "sh[";
+        for(int i = 0; i < ndim; ++i) {
+            s += vals[i] + (i < ndim - 1 ? " " : "");
+        }
+        s += "]";
+        return s;
+    }
+};
 
 // only 1D arrays
 struct Arr {
+    Shape sh;
     float *data = nullptr;
     std::string name = "undef";
-    int len = 0;
 
     Arr() = default;
-    Arr (int len, string name) : 
-        len(len), data(new float[len]), name(name) {
+    Arr (Shape sh, string name) : 
+        sh(sh), data(new float[sh.nelem()]), name(name) {
+        };
+
+    Arr (int n, string name) : 
+        sh(Shape::oned(n)), data(new float[n]), name(name) {
         };
 
     float & operator [](int ix) {
-        assert(ix <= len);
+        cout << name << "[" << ix << "]\n";
+        assert(ix < sh.nelem());
         assert(ix >= 0);
         return data[ix];
     }
     
     void print_data() {
         cout <<name <<  "[";
-        for(int i = 0; i < len; ++i) {
-            cout << data[i] << (i < len - 1 ? " " : "");
+        for(int i = 0; i < sh.nelem(); ++i) {
+            cout << data[i] << (i < sh.nelem() - 1 ? " " : "");
         }
         cout << "]\n";
     }
@@ -76,7 +108,7 @@ struct Expr {
     ExprType ty = ExprType::Undef;
     Arr val;
     // if it's a virtual node such as AllZeros, AllOnes, this will be its length. eg. AllZeros, AllOnes
-    int virtual_len;
+    Shape virtual_sh;
 
     Expr *args[10] = { nullptr };
     int npred = 0;
@@ -104,17 +136,13 @@ struct Expr {
         e->ty = ExprType::Add;
         e->addarg(this); 
         e->addarg(other);
-        const int len = unifylen(this->len(), other->len());
-        cout << this->get_name() << " + " << other->get_name();
-        cout << "LEN: " << len << "\n";
-        e->val = Arr(len, e->get_name());
+        e->val = Arr(Shape::unify(this->len(), other->len()), e->to_str());
         return e;
     }
 
     static Expr *pointwisemul(Expr *l,  Expr *r) {
         Expr *e = new Expr;
         e->ty = ExprType::PointwiseMul;
-        assert(unifylen(l->len(), r->len()));
         e->addarg(l);
         e->addarg(r);
         return e;
@@ -125,6 +153,7 @@ struct Expr {
         e->ty = ExprType::Matmul;
         e->addarg(this); 
         e->addarg(other);
+        return e;
     }
 
     Expr *dot(Expr *other) {
@@ -133,23 +162,23 @@ struct Expr {
         e->addarg(this); 
         e->addarg(other);
 
-        assert(this->len() == other->len());
-        e->val = Arr(1, e->get_name());
+        // assert(this->len() == other->len());
+        e->val = Arr(1, e->to_str());
         return e;
     }
 
-    Expr *allones(int len) {
+    Expr *allones(Shape sh) {
         Expr *e = new Expr;
         e->ty = ExprType::AllOnes;
-        e->virtual_len = len;
+        e->virtual_sh = sh;
         return e;
     }
 
 
-    Expr *allzeros(int len) {
+    Expr *allzeros(Shape sh) {
         Expr *e = new Expr;
         e->ty = ExprType::AllZeros;
-        e->virtual_len = len;
+        e->virtual_sh = sh;
         return e;
     }
 
@@ -175,7 +204,7 @@ struct Expr {
             case ExprType::Add:
                     args[0]->force();
                     args[1]->force();
-                for(int i = 0; i < args[0]->len(); ++i) {
+                for(int i = 0; i < args[0]->len().nelem(); ++i) {
                     val[i] = args[0]->at(i) + args[1]->at(i);
                 }
                 return;
@@ -183,15 +212,18 @@ struct Expr {
                     args[0]->force();
                     args[1]->force();
                     val[0] = 0;
-                    for(int i = 0; i < args[0]->len(); ++i) {
+                    assert(args[0]->len().ndim == 1);
+                    assert(args[1]->len().ndim == 1);
+
+                    for(int i = 0; i < args[0]->len().nelem(); ++i) {
                         val[0] += args[0]->at(i) * args[1]->at(i);
                     }
                     return;
             case ExprType::PointwiseMul:
                     args[0]->force();
                     args[1]->force();
-                    for(int i = 0; i < args[0]->len(); ++i) {
-                        val[i] = args[0]->at(i) * args[1]->at(i);
+                    for(int i = 0; i < args[0]->len().nelem(); ++i) {
+                            val[i] = args[0]->at(i) * args[1]->at(i);
                     }
 
             default: assert(false && "unhandled"); 
@@ -209,35 +241,35 @@ struct Expr {
         }
     }
 
-    int len() {
+    Shape len() {
         switch(ty) {
-            case ExprType::Arr: return val.len;
-            case ExprType::AllOnes: return virtual_len;
-            case ExprType::AllZeros: return virtual_len;
-            case ExprType::Add: return unifylen(args[0]->len(), args[1]->len());
-            case ExprType::PointwiseMul: return unifylen(args[0]->len(), args[1]->len());
+            case ExprType::Arr: return val.sh;
+            case ExprType::AllOnes: return virtual_sh;
+            case ExprType::AllZeros: return virtual_sh;
+            case ExprType::Add: return Shape::unify(args[0]->len(), args[1]->len());
+            case ExprType::PointwiseMul: return Shape::unify(args[0]->len(), args[1]->len());
             default:
                 assert (false && "unhandled");
         }
     }
 
 
-    string get_name() {
+    string to_str() {
         switch(ty) {
             case ExprType::Arr: return val.name;
             case ExprType::AllOnes: return "11..1";
             case ExprType::AllZeros: return "00..0";
             case ExprType::Add: 
-                return "(+ " + args[0]->get_name() + " " + 
-                        args[1]->get_name() + ")";
+                return "(+ " + args[0]->to_str() + " " + 
+                        args[1]->to_str() + ")";
 
             case ExprType::Dot: 
-                return "(dot " + args[0]->get_name() + " " + 
-                        args[1]->get_name() + ")";
+                return "(dot " + args[0]->to_str() + " " + 
+                        args[1]->to_str() + ")";
 
             case ExprType::PointwiseMul: 
-                return "(.* " + args[0]->get_name() + " " + 
-                        args[1]->get_name() + ")";
+                return "(.* " + args[0]->to_str() + " " + 
+                        args[1]->to_str() + ")";
             default:
                 assert(false && "unrechable");
 
@@ -257,7 +289,7 @@ void use_expr() {
 
     Expr *add = a->add(b);
     Expr *dot = b->dot(add);
-    cout << dot->get_name();
+    cout << dot->to_str();
 
     // force this thunk.
     cout << "\n";
@@ -274,7 +306,7 @@ void use_expr() {
 
     Expr *dotder = dot->grad("b");
     cout << "grad of dot wrt b:";
-    cout << ": " << dotder->get_name();
+    cout << ": " << dotder->to_str();
 
 }
 
