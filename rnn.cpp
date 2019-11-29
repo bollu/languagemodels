@@ -30,8 +30,8 @@ vector<vector<int> > sentences;
 
 struct Shape {
     static const int MAXDIM = 10;
-    int ndim = 0;
-    DimSize vals[Shape::MAXDIM];
+    int ndim = -42;
+    DimSize vals[Shape::MAXDIM] = {-42};;
 
     int nelem() {
         int n = 1;
@@ -190,6 +190,10 @@ struct Expr {
         e->ty = ExprType::MatMatMul;
         e->addarg(l);
         e->addarg(r);
+        assert(l->sh().ndim == 2);
+        assert(r->sh().ndim == 2);
+        assert(l->sh()[1] == r->sh()[0]);
+        e->val = Arr(Shape::twod(l->sh()[0], r->sh()[1]), e->to_str());
         return e;
 
     }
@@ -198,9 +202,10 @@ struct Expr {
         Expr *e = new Expr;
         e->ty = ExprType::MatVecMul;
         e->addarg(l);
+        e->addarg(r);
         assert(l->sh().ndim == 2);
         assert(r->sh().ndim == 1);
-        e->addarg(r);
+        e->val = Arr(r->sh(), e->to_str());
         return e;
 
     }
@@ -230,6 +235,7 @@ struct Expr {
         Expr *e = new Expr;
         e->ty = ExprType::Tanh;
         e->addarg(inner);
+        e->val = Arr(inner->sh(), e->to_str());
         return e;
     }
 
@@ -328,6 +334,7 @@ struct Expr {
                     for(int i = 0; i < args[0]->sh().nelem(); ++i) {
                         val[i] = tanhf(args[0]->at(i));
                     }
+                    return;
 
 
             case ExprType::MatMatMul: {
@@ -517,7 +524,6 @@ Expr *constantfold(Expr *e) {
                 return Expr::replicate(constantfold(e->args[0]), e->virtual_sh);
             }
 
-
         default: return e;
     }
 }
@@ -574,6 +580,12 @@ void use_expr() {
         Expr *tanhv = Expr::tanh(v);
         Expr *dot = Expr::matvecmul(m, tanhv);
         cout << "\ndot:" << dot->to_str();
+        dot->force();
+
+        cout << "\narrm:"; arrm.print_data();
+        cout << "arrv:"; arrv.print_data();
+        cout << "tanhv:"; tanhv->val.print_data();
+        cout << "dot:"; dot->val.print_data();
 
         Expr *dot_grad_m = dot->grad(arrm);
         for(int i = 0; i < 6; ++i) {
