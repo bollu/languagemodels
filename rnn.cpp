@@ -27,15 +27,12 @@ vector<vector<int> > sentences;
 // only 1D arrays
 struct Arr {
     float *data = nullptr;
-    float *der = nullptr;
     std::string name = "undef";
     int len = 0;
 
     Arr() = default;
     Arr (int len, string name) : 
-        len(len), data(new float[len]), der(new float[len]), name(name) {
-            // these variables are differentiable.
-            for(int i = 0; i < len; ++i) der[i] = 1.0;
+        len(len), data(new float[len]), name(name) {
         };
 
     float & operator [](int ix) {
