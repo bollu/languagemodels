@@ -198,6 +198,9 @@ enum class ExprType {
     Let, 
 };
 
+static const int MAXARGS = 30;
+static const int MAXPRED = 30;
+
 struct Expr {
     ExprType ty = ExprType::Undef;
     Arr val;
@@ -205,18 +208,18 @@ struct Expr {
     // length.
     Shape virtual_sh;
 
-    Expr *args[10] = { nullptr };
+    Expr *args[MAXARGS] = { nullptr };
     int npred = 0;
     int nargs = 0;
-    Expr *pred[10] = { nullptr };
+    Expr *pred[MAXPRED] = { nullptr };
 
     // constant float for Constant
     float constval;
 
     void addarg(Expr *e) {
-        assert(nargs < 10);
+        assert(nargs < MAXARGS);
         args[nargs++] = e;
-        assert(e->npred < 10);
+        assert(e->npred < MAXPRED);
         e->pred[e->npred++] = this;
     }
 
@@ -417,10 +420,10 @@ struct Expr {
 
                 // construct the derivative of dx wrt to the knowledge that the
                 // derivative of the let is darr.
-                dermap[darr.name] = darrval;
+                dermap[val.name] = Expr::arr(darr);
                 Expr *inner = args[1]->grad_(dx, outsh, dermap);
 
-                return Expr::let(darr, darrval, inner);
+                return Expr::let(darr, darrval, Expr::let(val, args[0], inner));
             }
             case ExprType::Arr:  {
                 // find this array in the derivative map.
@@ -774,7 +777,7 @@ void use_expr() {
         Arr arra = Arr(N, "a");
         Arr asq = Arr(N, "asq");
 
-        Expr *afour = Expr::add(Expr::arr(asq), Expr::arr(asq));
+        Expr *afour = Expr::add(Expr::arr(arra), Expr::add(Expr::arr(asq), Expr::arr(asq)));
         afour = Expr::let(asq, Expr::add(Expr::arr(arra), Expr::arr(arra)), afour);
         cout << "a^4: " << afour->to_str() << "\n\n";
         cout << "a^4->grad[a]: " << afour->grad(arra)->to_str() << "\n\n";
