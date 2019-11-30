@@ -404,12 +404,12 @@ struct Expr {
     }  
 
     Expr *grad(Arr dx) {
-        return grad_(dx, dx.sh, {{dx, Expr::allones(dx.sh)}});
+        return grad_(dx, dx.sh, {{dx.name, Expr::allones(dx.sh)}});
     }
 
 
     // return the expression for the gradient with the other array
-    Expr *grad_(Arr dx, Shape outsh, map<Arr, Expr *> dermap) {
+    Expr *grad_(Arr dx, Shape outsh, map<string, Expr *> dermap) {
         switch(ty) {
             case ExprType::Let: {
                 Arr darr = Arr(val.sh, "d" + val.name);
@@ -417,20 +417,18 @@ struct Expr {
 
                 // construct the derivative of dx wrt to the knowledge that the
                 // derivative of the let is darr.
-                dermap[darr] = darrval;
+                dermap[darr.name] = darrval;
                 Expr *inner = args[1]->grad_(dx, outsh, dermap);
 
                 return Expr::let(darr, darrval, inner);
             }
             case ExprType::Arr:  {
-                auto it = dermap.find(dx);
-
-                // if it's in the map, return the value
+                // find this array in the derivative map.
+                auto it = dermap.find(this->val.name);                
+                 // if it's in the map, return the value
                 if (it != dermap.end()) { return new Expr(*it->second); }
+                else { return Expr::allzeros(sh()); }
 
-                return Expr::allzeros(sh());
-                // return val.name == dx.name ? 
-                //    Expr::allones(sh()) : Expr::allzeros(sh());
              }
             case ExprType::Add:
                 return Expr::add(args[0]->grad_(dx, outsh, dermap), args[1]->grad_(dx, outsh, dermap));
@@ -457,7 +455,7 @@ struct Expr {
                    // (d/dN(M x) = M [dx/dN] + [dM/dy]
                    return Expr::add(
                            Expr::replicate(Expr::matvecmul(args[0]->grad_(dx, args[0]->sh(), dermap), args[1]), outsh),
-                           Expr::replicate(Expr::matvecmul(args[0], args[1]->grad_(dx, args[1]->sh(), dermap)), outsh)) ;
+                           Expr::replicate(Expr::matvecmul(args[0], args[1]->grad_(dx, args[1]->sh(), dermap)), outsh));
                }
             case ExprType::Batch: {
                 return Expr::batch(args[0]->grad_(dx, args[0]->sh(), dermap));
@@ -791,7 +789,7 @@ void use_expr() {
     Expr *b = Expr::arr(arrb);
 
     Expr *add = Expr::add(a, b);
-    Expr *dot = Expr::dot(add, b);
+    Expr *dot = Expr::dot(a, b);
     cout << dot->to_str();
 
     // force this thunk.
