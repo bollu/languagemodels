@@ -263,6 +263,7 @@ struct Expr {
         e->ty = ExprType::MatVecMul;
         e->addarg(l);
         e->addarg(r);
+
         assert(l->sh().ndim == 2);
         assert(r->sh().ndim == 1);
         assert(l->sh()[1] == r->sh()[0]);
@@ -367,40 +368,52 @@ struct Expr {
         return e;
     }   
 
+    Expr *grad(Arr dx) {
+        return grad_(dx, dx.sh);
+    }
+
 
     // return the expression for the gradient with the other array
-    Expr *grad(Arr dx) {
+    Expr *grad_(Arr dx, Shape outsh) {
         switch(ty) {
             case ExprType::Arr:  {
                 return val.name == dx.name ? 
                     Expr::allones(sh()) : Expr::allzeros(sh());
              }
             case ExprType::Add:
-                return Expr::add(args[0]->grad(dx), args[1]->grad(dx));
+                return Expr::add(args[0]->grad_(dx, outsh), args[1]->grad_(dx, outsh));
+            case ExprType::Sub:
+                return Expr::sub(args[0]->grad_(dx, outsh), args[1]->grad_(dx, outsh));
             case ExprType::Dot:
-                return Expr::add(Expr::pointwisemul(args[0]->grad(dx), args[1]),
-                        Expr::pointwisemul(args[0], args[1]->grad(dx)));
+                return Expr::add(Expr::pointwisemul(args[0]->grad_(dx, outsh), args[1]),
+                        Expr::pointwisemul(args[0], args[1]->grad_(dx, outsh)));
             // (1 - tanh^2 X) .* X'
             case ExprType::Tanh: {
                 Expr *dtan = Expr::sub(Expr::allones(sh()), Expr::pointwisemul(new Expr(*this), new Expr(*this)));
                 // derivative of the inner computation
-                Expr *dinner = args[0]->grad(dx);
+                Expr *dinner = args[0]->grad_(dx, args[0]->sh());
                 return Expr::pointwisemul(dtan, dinner);
              }
             case ExprType::MatMatMul: {
                     assert(false && "need to implement replicate");
-                   return Expr::add(Expr::matmatmul(args[0]->grad(dx), args[1]),
-                           Expr::matmatmul(args[0], args[1]->grad(dx)));
+                   return Expr::add(Expr::matmatmul(args[0]->grad_(dx, args[0]->sh()), args[1]),
+                           Expr::matmatmul(args[0], args[1]->grad_(dx, args[1]->sh())));
 
                }
             case ExprType::MatVecMul: {
                    // TODO!! What is the justification for the "fit shape"??
                    // (d/dN(M x) = M [dx/dN] + [dM/dy]
                    return Expr::add(
-                           Expr::replicate(Expr::matvecmul(args[0]->grad(dx), args[1]), dx.sh),
-                           Expr::replicate(Expr::matvecmul(args[0], args[1]->grad(dx)), dx.sh)) ;
+                           Expr::replicate(Expr::matvecmul(args[0]->grad_(dx, args[0]->sh()), args[1]), outsh),
+                           Expr::replicate(Expr::matvecmul(args[0], args[1]->grad_(dx, args[1]->sh())), outsh)) ;
                }
-            default: assert(false && "unimplemented");
+            case ExprType::Batch: {
+                return Expr::batch(args[0]->grad_(dx, args[0]->sh()));
+            }
+
+            default:
+                cerr << "\nUnimplemented gradient:\n|" << to_str() << "|\n";
+                assert(false && "unimplemented");
         }
     }
     
@@ -801,7 +814,7 @@ void use_expr() {
         cout << "\n\n\nRNN Computation with batching\n\n\n";
         // joint modelling of words and corpus
         static const int batchsize = 2;
-        static const int windowsize = 3;
+        static const int windowsize = 1;
         static const int embedsize = 4;
         static const int hiddensize = 10;
         vector<int> sentence;
@@ -830,8 +843,6 @@ void use_expr() {
 
         Expr *hiddens[windowsize+1];
 
-        
-        
         // create the compute kernel
         hiddens[0] = Expr::arr(Arr(hiddensize, "hinit"));
         for(int i = 1; i <= windowsize; ++i) {
