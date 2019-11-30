@@ -53,6 +53,24 @@ struct Shape {
         return true;
     }
 
+    // lex comparison
+    bool operator < (const Shape &other) const {
+        if (ndim < other.ndim) return true;
+        if (ndim > other.ndim) return false;
+
+        assert(ndim == other.ndim);
+
+        for(int i = 0; i < ndim; ++i) {
+            if (vals[i] < other.vals[i]) return true;
+            if (vals[i] > other.vals[i]) return false;
+            assert(vals[i] == other.vals[i]);
+        }
+
+        assert(*this == other);
+        return false;
+
+    }
+
     static Shape unify(Shape sh1, Shape sh2) {
         Shape smaller, larger;
         if (sh1.ndim < sh2.ndim) { smaller = sh1; larger = sh2; }
@@ -147,6 +165,12 @@ struct Arr {
         }
         cout << "]\n";
     }
+
+    bool operator < (const Arr &other) const {
+        // lex compare, first on name, then on shape
+        return name < other.name || 
+            ((name == other.name) && (sh < other.sh));
+    }
 };
 
 enum class ExprType {
@@ -169,7 +193,9 @@ enum class ExprType {
     // define a batch dimensions
     Batch,
     // unbatch a batch dimension to specify final computation of gradient update
-    Unbatch, 
+    Unbatch,
+    // let bindings. 
+    Let, 
 };
 
 struct Expr {
@@ -366,49 +392,77 @@ struct Expr {
         e->virtual_sh = Shape::zerod();
         e->val = Arr(e->virtual_sh, e->to_str());
         return e;
-    }   
+    }
+
+    static Expr *let(Arr lhs, Expr *rhs, Expr *in) {
+        Expr *e = new Expr;
+        e->ty = ExprType::Let;
+        e->val = lhs;
+        e->args[0] = rhs;
+        e->args[1] = in;
+        assert(e->val.sh == e->args[0]->sh());
+        return e;
+    }  
 
     Expr *grad(Arr dx) {
-        return grad_(dx, dx.sh);
+        return grad_(dx, dx.sh, {{dx, Expr::allones(dx.sh)}});
     }
 
 
     // return the expression for the gradient with the other array
-    Expr *grad_(Arr dx, Shape outsh) {
+    Expr *grad_(Arr dx, Shape outsh, map<Arr, Expr *> dermap) {
         switch(ty) {
+            case ExprType::Let: {
+                Arr darr = Arr(val.sh, "d" + val.name);
+                Expr *darrval =  args[0]->grad_(val, val.sh, dermap);
+
+                // construct the derivative of dx wrt to the knowledge that the
+                // derivative of the let is darr.
+                dermap[darr] = darrval;
+                Expr *inner = args[1]->grad_(dx, outsh, dermap);
+
+                return Expr::let(darr, darrval, inner);
+
+            }
             case ExprType::Arr:  {
-                return val.name == dx.name ? 
-                    Expr::allones(sh()) : Expr::allzeros(sh());
+                auto it = dermap.find(dx);
+
+                // if it's in the map, return the value
+                if (it != dermap.end()) { return new Expr(*it->second); }
+
+                return Expr::allzeros(sh());
+                // return val.name == dx.name ? 
+                //    Expr::allones(sh()) : Expr::allzeros(sh());
              }
             case ExprType::Add:
-                return Expr::add(args[0]->grad_(dx, outsh), args[1]->grad_(dx, outsh));
+                return Expr::add(args[0]->grad_(dx, outsh, dermap), args[1]->grad_(dx, outsh, dermap));
             case ExprType::Sub:
-                return Expr::sub(args[0]->grad_(dx, outsh), args[1]->grad_(dx, outsh));
+                return Expr::sub(args[0]->grad_(dx, outsh, dermap), args[1]->grad_(dx, outsh, dermap));
             case ExprType::Dot:
-                return Expr::add(Expr::pointwisemul(args[0]->grad_(dx, outsh), args[1]),
-                        Expr::pointwisemul(args[0], args[1]->grad_(dx, outsh)));
+                return Expr::add(Expr::pointwisemul(args[0]->grad_(dx, outsh, dermap), args[1]),
+                        Expr::pointwisemul(args[0], args[1]->grad_(dx, outsh, dermap)));
             // (1 - tanh^2 X) .* X'
             case ExprType::Tanh: {
                 Expr *dtan = Expr::sub(Expr::allones(sh()), Expr::pointwisemul(new Expr(*this), new Expr(*this)));
                 // derivative of the inner computation
-                Expr *dinner = args[0]->grad_(dx, args[0]->sh());
+                Expr *dinner = args[0]->grad_(dx, args[0]->sh(), dermap);
                 return Expr::pointwisemul(dtan, dinner);
              }
             case ExprType::MatMatMul: {
                     assert(false && "need to implement replicate");
-                   return Expr::add(Expr::matmatmul(args[0]->grad_(dx, args[0]->sh()), args[1]),
-                           Expr::matmatmul(args[0], args[1]->grad_(dx, args[1]->sh())));
+                   return Expr::add(Expr::matmatmul(args[0]->grad_(dx, args[0]->sh(), dermap), args[1]),
+                           Expr::matmatmul(args[0], args[1]->grad_(dx, args[1]->sh(), dermap)));
 
                }
             case ExprType::MatVecMul: {
                    // TODO!! What is the justification for the "fit shape"??
                    // (d/dN(M x) = M [dx/dN] + [dM/dy]
                    return Expr::add(
-                           Expr::replicate(Expr::matvecmul(args[0]->grad_(dx, args[0]->sh()), args[1]), outsh),
-                           Expr::replicate(Expr::matvecmul(args[0], args[1]->grad_(dx, args[1]->sh())), outsh)) ;
+                           Expr::replicate(Expr::matvecmul(args[0]->grad_(dx, args[0]->sh(), dermap), args[1]), outsh),
+                           Expr::replicate(Expr::matvecmul(args[0], args[1]->grad_(dx, args[1]->sh(), dermap)), outsh)) ;
                }
             case ExprType::Batch: {
-                return Expr::batch(args[0]->grad_(dx, args[0]->sh()));
+                return Expr::batch(args[0]->grad_(dx, args[0]->sh(), dermap));
             }
 
             default:
