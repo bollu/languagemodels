@@ -680,6 +680,12 @@ Expr *constantfold(Expr *e) {
             }
             return Expr::add(constantfold(e->args[0]), constantfold(e->args[1]));
 
+        case ExprType::Sub:
+            if(e->args[1]->ty == ExprType::AllZeros) {
+                return constantfold(e->args[0]);
+            }
+            return Expr::sub(constantfold(e->args[0]), constantfold(e->args[1]));
+
         case ExprType::Replicate:
             if (e->args[0]->sh() == e->virtual_sh) {
                 return constantfold(e->args[0]);
@@ -693,6 +699,15 @@ Expr *constantfold(Expr *e) {
             else {
                 return Expr::replicate(constantfold(e->args[0]), e->virtual_sh);
             }
+
+        case ExprType::Batch:
+            if (e->args[0]->ty == ExprType::AllZeros) {
+                return Expr::allzeros(e->sh());
+            }
+            else if (e->args[0]->ty == ExprType::AllOnes) {
+                return Expr::allones(e->sh());
+            }
+            return Expr::batch(constantfold(e->args[0]));
 
         default: return e;
     }
@@ -861,7 +876,12 @@ void use_expr() {
 
         // find derivative of loss wrt H2H, H2O, I2H, H2OBias
         Expr *H2Hgrad = loss->grad(H2H);
-        cout << "\n\nloss->grad[H2H]: " << H2Hgrad->to_str();
+        for(int i = 0; i < 6; ++i) {
+            cout << "\n" << i << "| out->grad[H2H]:" << H2Hgrad->to_str();
+                H2Hgrad = constantfold(H2Hgrad);
+        }
+        cout << "\n\n";
+
         
         Expr *H2Ograd = loss->grad(H2O);
         cout << "\n\nloss->grad[H2O]: " << H2Ograd->to_str();
