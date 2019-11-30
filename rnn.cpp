@@ -226,6 +226,7 @@ struct Expr {
         e->addarg(r);
         assert(l->sh().ndim == 2);
         assert(r->sh().ndim == 1);
+        assert(l->sh()[1] == r->sh()[0]);
         e->val = Arr(r->sh(), e->to_str());
         return e;
 
@@ -430,8 +431,9 @@ struct Expr {
             case ExprType::Add: return Shape::unify(args[0]->sh(), args[1]->sh());
             case ExprType::Sub: return Shape::unify(args[0]->sh(), args[1]->sh());
             case ExprType::PointwiseMul: return Shape::unify(args[0]->sh(), args[1]->sh());
-            case ExprType::MatMatMul: return args[0]->sh();
-            case ExprType::MatVecMul: return args[1]->sh();
+            // TODO: find shape of contraction.
+            case ExprType::MatMatMul: return Shape::twod(args[0]->sh()[0], args[1]->sh()[1]);
+            case ExprType::MatVecMul: return Shape::oned(args[0]->sh()[0]);
             default:
                 assert (false && "unhandled");
         }
@@ -624,6 +626,42 @@ void use_expr() {
             out_grad_v = constantfold(out_grad_v);
         }
         // cout << "\ndot der wrt a:" << dot->grad("b");
+    } 
+
+    {
+        cout << "\n\n\nRNN Computation\n\n\n";
+        // joint modelling of words and corpus
+        static const int windowsize = 3;
+        static const int embedsize = 4;
+        static const int hiddensize = 10;
+        vector<int> sentence;
+        vector<Arr> embeds;
+        Expr *inputs[windowsize];
+        Expr *hiddens[windowsize+1];
+
+        Arr H2H = Arr(hiddensize, hiddensize, "H2H");
+        Arr I2H = Arr(hiddensize, embedsize, "I2H");
+        Arr H2HBias = Arr(hiddensize, "H2HBias");
+
+        Arr H2O = Arr(embedsize, hiddensize, "H2O");
+        Arr H2OBias = Arr(embedsize, "H2OBias");
+
+        for(int i = 0; i < (int)vocab.size(); ++i) {
+            embeds[i] = Arr(embedsize, ix2word[i]);
+        }
+
+        for(int i = 0; i < windowsize; ++i) {
+            inputs[i] = Expr::arr(Arr(embedsize, "i" + std::to_string(i)));
+        }
+
+        hiddens[0] = Expr::arr(Arr(hiddensize, "hinit"));
+        for(int i = 1; i <= windowsize; ++i) {
+            hiddens[i] = Expr::tanh(Expr::add(Expr::matvecmul(Expr::arr(I2H), inputs[i-1]),
+                        Expr::matvecmul(Expr::arr(H2H), hiddens[i-1])));
+        }
+
+        Expr *out = Expr::tanh(Expr::add(Expr::matvecmul(Expr::arr(H2O), hiddens[windowsize]), Expr::arr(H2OBias)));
+        cout << "RNN output: " << out->to_str();
     }
 
 }
