@@ -53,6 +53,10 @@ struct Shape {
         return true;
     }
 
+    bool operator != (const Shape &other) const {
+        return !(*this == other);
+    }
+
     // lex comparison
     bool operator < (const Shape &other) const {
         if (ndim < other.ndim) return true;
@@ -171,6 +175,14 @@ struct Arr {
         return name < other.name || 
             ((name == other.name) && (sh < other.sh));
     }
+
+    bool operator == (const Arr &other) const {
+        return name == other.name && (sh == other.sh);
+    }
+
+    bool operator != (const Arr &other) const {
+        return !(*this == other);
+    }
 };
 
 enum class ExprType {
@@ -210,9 +222,7 @@ struct Expr {
     Shape virtual_sh;
 
     Expr *args[MAXARGS] = { nullptr };
-    int npred = 0;
     int nargs = 0;
-    Expr *pred[MAXPRED] = { nullptr };
 
     // constant float for Constant
     float constval;
@@ -220,12 +230,75 @@ struct Expr {
     void addarg(Expr *e) {
         assert(nargs < MAXARGS);
         args[nargs++] = e;
-        assert(e->npred < MAXPRED);
-        e->pred[e->npred++] = this;
+        // assert(e->npred < MAXPRED);
+        // e->pred[e->npred++] = this;
     }
 
     Expr() = default;
     Expr(const Expr &other) = default;
+
+    bool operator > (const Expr &other) const {
+        return (other < *this) && (other != *this);
+    }
+
+    bool operator < (const Expr &other) const {
+        if (ty < other.ty) { return true; }
+        if (ty > other.ty) { return false; }
+        
+        if (val.name < other.val.name) { return true; }
+        if (val.name > other.val.name) { return false; }
+        /*
+        if ((ty == ExprType::AllOnes || ty == ExprType::AllZeros || ty ==
+                    ExprType::Index || ty == ExprType::Unbatch || ty ==
+                    ExprType :: Replicate) && (virtual_sh < other.virtual_sh)) {
+            return true;
+        }
+        */
+
+        if (nargs < other.nargs) return true;
+        if (nargs > other.nargs) return false;
+        assert(nargs == other.nargs);
+        for(int i = 0; i < nargs; ++i) {
+            if (*args[i] < *other.args[i]) return true;
+            if (*args[i] > *other.args[i]) return false;
+        }
+        // predecessors don't matter since we never use them.
+
+        if (ty == ExprType::Constant && constval < other.constval) { 
+            return true; 
+        }
+        if (ty == ExprType::Constant && constval > other.constval) { 
+            return false; 
+        }
+
+        return false;
+    } 
+
+    bool operator != (const Expr &other) const {
+        if (ty != other.ty) { return true; }
+        if (val != other.val) { return true; }
+        if ((ty == ExprType::AllOnes || ty == ExprType::AllZeros || ty ==
+                    ExprType::Index || ty == ExprType::Unbatch || ty ==
+                    ExprType :: Replicate) && virtual_sh != other.virtual_sh) {
+            return true;
+        }
+
+        if (nargs != other.nargs) return true;
+        for(int i = 0; i < nargs; ++i) {
+            if (*args[i] != *other.args[i]) return true;
+        }
+        // predecessors don't matter since we never use them.
+
+        if (ty == ExprType::Constant && constval != other.constval) { 
+            return true; 
+        }
+
+        return false;
+    } 
+
+    bool operator == (const Expr &other) {
+        return !(*this == other);
+    }
 
     static Expr *arr(Arr a) {
         Expr *e = new Expr;
@@ -611,11 +684,11 @@ struct Expr {
             case ExprType::AllOnes: return virtual_sh;
             case ExprType::AllZeros: return virtual_sh;
             case ExprType::Index: return virtual_sh;
+            case ExprType::Unbatch: return virtual_sh;
+            case ExprType::Replicate: return virtual_sh;
             case ExprType::Tanh: return args[0]->sh();
             case ExprType::DerTanh: return args[0]->sh();
-            case ExprType::Replicate: return virtual_sh;
             case ExprType::Batch: return args[0]->sh().removeOutermost();
-            case ExprType::Unbatch: return virtual_sh;
             case ExprType::Constant: return Shape::zerod(); 
             case ExprType::Add: 
                 return Shape::unify(args[0]->sh(), args[1]->sh());
@@ -702,6 +775,47 @@ bool isexprconstant(const Expr *e) {
             return true;
         default: return false;
     }
+}
+
+void getSubexpressions(Expr *e, set<Expr> &s) {
+
+    switch(e->ty) {
+        case ExprType::Arr: return;
+        case ExprType::Add:
+        case ExprType::Sub:
+        case ExprType::PointwiseMul:
+        case ExprType::Dot:
+        case ExprType::MatMatMul:
+        case ExprType::MatVecMul:
+            s.insert(*e);
+            getSubexpressions(e->args[0], s);
+            getSubexpressions(e->args[1], s);
+            return;
+
+        case ExprType::Tanh:
+        case ExprType::DerTanh:
+            s.insert(*e);
+            getSubexpressions(e->args[0], s);
+            return;
+
+        default:
+            cerr << "unknown expr:\n|" << e->to_str() << "|\n";
+            assert(false && "unknown expr for getSubexpressions");
+    }
+    
+}
+
+Expr *commonSubexpressionElimination(Expr *e) {
+    set<Expr> s;
+    getSubexpressions(e, s);
+
+    cout << "subexpressions:\n";
+    for(Expr e : s) {
+        cout << "**---" << e.to_str() << "\n";
+    }
+    exit(0);
+
+    return e;
 }
 
 // move all constants to the left. If both params are constants, then fold
@@ -900,12 +1014,15 @@ void use_expr() {
         }
 
         Expr *out = Expr::tanh(Expr::add(Expr::matvecmul(Expr::arr(H2O), hiddens[windowsize]), Expr::arr(H2OBias)));
-    
+        cout << "out: " << out->to_str() << "\n";
+
         Expr *H2Hgrad = out->grad(H2H);
         for(int i = 0; i < 6; ++i) {
             cout << "\n" << i << "| out->grad[H2H]:" << H2Hgrad->to_str();
                 H2Hgrad = constantfold(H2Hgrad);
         }
+
+        commonSubexpressionElimination(H2Hgrad);
 
         Expr *H2OGrad = out->grad(H2O);
         for(int i = 0; i < 6; ++i) {
