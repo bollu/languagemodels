@@ -281,7 +281,6 @@ struct Expr {
         assert(l->sh()[1] == r->sh()[0]);
         e->val = Arr(Shape::twod(l->sh()[0], r->sh()[1]), e->to_str());
         return e;
-
     }
 
     static Expr *matvecmul(Expr *l, Expr *r) {
@@ -414,7 +413,7 @@ struct Expr {
         switch(ty) {
             case ExprType::Let: {
                 Arr darr = Arr(val.sh, "d" + val.name);
-                Expr *darrval =  args[0]->grad_(val, val.sh, dermap);
+                Expr *darrval =  args[0]->grad_(dx, val.sh, dermap);
 
                 // construct the derivative of dx wrt to the knowledge that the
                 // derivative of the let is darr.
@@ -422,7 +421,6 @@ struct Expr {
                 Expr *inner = args[1]->grad_(dx, outsh, dermap);
 
                 return Expr::let(darr, darrval, inner);
-
             }
             case ExprType::Arr:  {
                 auto it = dermap.find(dx);
@@ -673,6 +671,9 @@ struct Expr {
                     args[0]->to_str() + ")";
             case ExprType::Constant:
                 return "(constant " + to_string(constval) + ")";
+            case ExprType::Let:
+                return "(let " + val.name + " := " + args[0]->to_str() +  
+                    " in " + args[1]->to_str() + ")";
             default:
                 assert(false && "unimplemented to_str()");
 
@@ -768,6 +769,18 @@ Expr *constantfold(Expr *e) {
 }
 
 void use_expr() { 
+    {
+        cout << "Let bindings\n\n";
+
+        const int N = 3;
+        Arr arra = Arr(N, "a");
+        Arr asq = Arr(N, "asq");
+
+        Expr *afour = Expr::add(Expr::arr(asq), Expr::arr(asq));
+        afour = Expr::let(asq, Expr::add(Expr::arr(arra), Expr::arr(arra)), afour);
+        cout << "a^4: " << afour->to_str() << "\n\n";
+        cout << "a^4->grad[a]: " << afour->grad(arra)->to_str() << "\n\n";
+    }
     {
     const int N = 3;
     Arr arra = Arr(N, "a");
@@ -878,6 +891,7 @@ void use_expr() {
 
 
     }
+
     
     {
         cout << "\n\n\nRNN Computation with batching\n\n\n";
