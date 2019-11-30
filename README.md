@@ -1,5 +1,18 @@
 # Languagemodels
 
+## `rnn.cpp`
+
+make each array expression "implicit" by default, and then create a tensor
+type that instantiates it.
+
+Currently writing a DSL for array based derivatives. Small, extensible API
+that's meant to generate close to the metal code. Will generate code
+using [`facebookresearch/TensorComprehensions`](https://github.com/facebookresearch/TensorComprehensions)
+
+I keep whining about how PyTorch is slow and TensorFlow makes me want to kill
+myself, so I might as well be the change I want to see in the world
+with regards to libraries for machine learning...
+
 ## `lstm.py`
 
 jointly train the language model with the word embedding. Use `--train` to
