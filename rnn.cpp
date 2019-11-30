@@ -184,6 +184,7 @@ enum class ExprType {
     // constant aray
     Constant,
     Tanh,
+    DerTanh,
     Arr, 
     Undef, 
     AllOnes, 
@@ -332,6 +333,15 @@ struct Expr {
         return e;
     }
 
+    static Expr *dertanh(Expr *inner) {
+        Expr *e = new Expr;
+        e->ty = ExprType::DerTanh;
+        e->addarg(inner);
+        e->val = Arr(inner->sh(), e->to_str());
+        return e;
+    }
+
+
     static Expr *allones(Shape sh) {
         Expr *e = new Expr;
         e->ty = ExprType::AllOnes;
@@ -442,10 +452,8 @@ struct Expr {
                         Expr::pointwisemul(args[0], args[1]->grad_(dx, outsh, dermap)));
             // (1 - tanh^2 X) .* X'
             case ExprType::Tanh: {
-                Expr *dtan = Expr::sub(Expr::allones(sh()), Expr::pointwisemul(new Expr(*this), new Expr(*this)));
-                // derivative of the inner computation
                 Expr *dinner = args[0]->grad_(dx, args[0]->sh(), dermap);
-                return Expr::pointwisemul(dtan, dinner);
+                return Expr::pointwisemul(Expr::dertanh(args[0]), dinner);
              }
             case ExprType::MatMatMul: {
                     assert(false && "need to implement replicate");
@@ -604,6 +612,7 @@ struct Expr {
             case ExprType::AllZeros: return virtual_sh;
             case ExprType::Index: return virtual_sh;
             case ExprType::Tanh: return args[0]->sh();
+            case ExprType::DerTanh: return args[0]->sh();
             case ExprType::Replicate: return virtual_sh;
             case ExprType::Batch: return args[0]->sh().removeOutermost();
             case ExprType::Unbatch: return virtual_sh;
@@ -645,6 +654,9 @@ struct Expr {
 
             case ExprType::Tanh:
                 return "(tanh " + args[0]->to_str() + ")";
+
+            case ExprType::DerTanh:
+                return "(tanh' " + args[0]->to_str() + ")";
 
             case ExprType::PointwiseMul: 
                 return "(.* " + args[0]->to_str() + " " + 
@@ -888,8 +900,18 @@ void use_expr() {
         }
 
         Expr *out = Expr::tanh(Expr::add(Expr::matvecmul(Expr::arr(H2O), hiddens[windowsize]), Expr::arr(H2OBias)));
-        cout << "RNN output: " << out->to_str() << "\n\n";
+    
+        Expr *H2Hgrad = out->grad(H2H);
+        for(int i = 0; i < 6; ++i) {
+            cout << "\n" << i << "| out->grad[H2H]:" << H2Hgrad->to_str();
+                H2Hgrad = constantfold(H2Hgrad);
+        }
 
+        Expr *H2OGrad = out->grad(H2O);
+        for(int i = 0; i < 6; ++i) {
+            cout << "\n" << i << "| out->grad[H2O]:" << H2OGrad->to_str();
+                H2OGrad = constantfold(H2OGrad);
+        }
 
     }
 
