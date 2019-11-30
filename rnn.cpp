@@ -62,6 +62,12 @@ struct Shape {
             assert(smaller[i] == larger[i]);
         }
         return larger;
+    }   
+
+    static Shape zerod() {
+        Shape sh;
+        sh.ndim = 0;
+        return sh;
     }
 
     static Shape oned(int n) {
@@ -151,6 +157,8 @@ enum class ExprType {
     MatVecMul,
     Replicate,
     PointwiseMul,
+    // constant aray
+    Constant,
     Tanh,
     Arr, 
     Undef, 
@@ -160,6 +168,8 @@ enum class ExprType {
     Index,
     // define a batch dimensions
     Batch,
+    // unbatch a batch dimension to specify final computation of gradient update
+    Unbatch, 
 };
 
 struct Expr {
@@ -173,6 +183,9 @@ struct Expr {
     int npred = 0;
     int nargs = 0;
     Expr *pred[10] = { nullptr };
+
+    // constant float for Constant
+    float constval;
 
     void addarg(Expr *e) {
         assert(nargs < 10);
@@ -335,6 +348,26 @@ struct Expr {
         return e;
     }
 
+    static Expr *unbatch(Expr *arr, int batchsize) {
+        Expr *e = new Expr;
+        e->addarg(arr);
+        e->ty = ExprType::Unbatch;
+        // TODO: check that this matches the inner Batch() sizes.
+        e->virtual_sh = arr->sh().addOutermost(batchsize); 
+        e->val = Arr(e->virtual_sh, e->to_str());
+        return e;
+    }
+
+    static Expr *constant(float c) {
+        Expr *e = new Expr;
+        e->ty = ExprType::Constant;
+        e->constval = c;
+        e->virtual_sh = Shape::zerod();
+        e->val = Arr(e->virtual_sh, e->to_str());
+        return e;
+    }   
+
+
     // return the expression for the gradient with the other array
     Expr *grad(Arr dx) {
         switch(ty) {
@@ -478,7 +511,7 @@ struct Expr {
                 return;
           }
 
-            default: cerr << to_str(); assert(false && "unhandled"); 
+          default: cerr << to_str(); assert(false && "unhandled"); 
         }
     }
 
@@ -507,6 +540,8 @@ struct Expr {
             case ExprType::Tanh: return args[0]->sh();
             case ExprType::Replicate: return virtual_sh;
             case ExprType::Batch: return args[0]->sh().removeOutermost();
+            case ExprType::Unbatch: return virtual_sh;
+            case ExprType::Constant: return Shape::zerod(); 
             case ExprType::Add: 
                 return Shape::unify(args[0]->sh(), args[1]->sh());
             case ExprType::Sub: 
@@ -566,6 +601,11 @@ struct Expr {
                             args[1]->to_str() + ")";
             case ExprType::Batch:
                 return "(batch " + args[0]->to_str() + ")";
+            case ExprType::Unbatch:
+                return "(unbatch " + to_string(virtual_sh[0]) + " " + 
+                    args[0]->to_str() + ")";
+            case ExprType::Constant:
+                return "(constant " + to_string(constval) + ")";
             default:
                 assert(false && "unimplemented to_str()");
 
@@ -785,8 +825,8 @@ void use_expr() {
             inputs[i] = Expr::arr(Arr(batchsize, embedsize, "i_batched" + std::to_string(i)));
         }
 
-        // outputs array, batchsize x 1
-        Arr output = Arr(batchsize, "output_batched");
+        // outputs array, batchsize x embedsize
+        Arr outputs = Arr(batchsize, embedsize, "output_batched");
 
         Expr *hiddens[windowsize+1];
 
@@ -801,10 +841,34 @@ void use_expr() {
 
         // should be batchsize x embedsize, but our kernel pretends it is embedsize
         Expr *predict = Expr::tanh(Expr::add(Expr::matvecmul(Expr::arr(H2O), hiddens[windowsize]), Expr::arr(H2OBias)));
-        cout << "RNN prediction: " << predict->to_str() << "\n\n";
+
+        cout << "RNN prediction:\n" << predict->to_str();
+
+        // full loss
+        Expr *loss = Expr::sub(Expr::batch(Expr::arr(outputs)), predict);
+        cout << "\n\nRRN loss:\n" << loss->to_str();
+
+        // find derivative of loss wrt H2H, H2O, I2H, H2OBias
+        Expr *H2Hgrad = loss->grad(H2H);
+        cout << "\n\nloss->grad[H2H]: " << H2Hgrad->to_str();
+        
+        Expr *H2Ograd = loss->grad(H2O);
+        cout << "\n\nloss->grad[H2O]: " << H2Ograd->to_str();
+        
+        Expr *I2Hgrad = loss->grad(I2H);
+        cout << "\n\nloss->grad[I2H]: " << I2Hgrad->to_str();
+        
+        Expr *H2OBiasgrad = loss->grad(H2OBias);
+        cout << "\n\nloss->grad[H2OBias]: " << H2OBiasgrad->to_str();
+        
+        
+        // scaled gradient
+        const float learningrate = 1e-2;
+        Expr *H2hgradscaled = Expr::pointwisemul(Expr::constant(learningrate), H2Hgrad);
+        cout << "\n\nlearningrate * loss->grad[H2H]:\n" << H2hgradscaled->to_str();
 
 
-    }
+    }   
 
 
 }
