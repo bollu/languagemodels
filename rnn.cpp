@@ -87,9 +87,31 @@ struct Shape {
         s += "]";
         return s;
     }
+
+    // remove an outermost (leftmost) dimension
+    Shape removeOutermost() const {
+        Shape sh;
+        assert(ndim > 0);
+        sh.ndim = ndim - 1;
+        for(int i = 0; i < ndim - 1; ++i) {
+            sh.vals[i] = vals[i+1];
+        }
+        return sh;
+    }
+
+    // append an outermost dimension
+    Shape addOutermost(int size) const {
+        Shape sh = *this;
+        sh.ndim++;
+        for(int i = 1; i < ndim+1; ++i) {
+            sh.vals[i] = vals[i-1];
+        }
+        sh.vals[0] = size;
+        return sh;
+    }
 };
 
-// only 1D arrays
+// only 1D frrays
 struct Arr {
     Shape sh;
     float *data = nullptr;
@@ -133,15 +155,19 @@ enum class ExprType {
     Arr, 
     Undef, 
     AllOnes, 
-    AllZeros
+    AllZeros,
+    // select a sub array from a given array. Used for embedding indexing.
+    Index,
+    // define a batch dimensions
+    Batch,
 };
 
 struct Expr {
     ExprType ty = ExprType::Undef;
     Arr val;
-    // if it's a virtual node such as AllZeros, AllOnes, this will be its length. eg. AllZeros, AllOnes
+    // if it's a virtual node such as AllZeros, AllOnes, this will be its
+    // length.
     Shape virtual_sh;
-
 
     Expr *args[10] = { nullptr };
     int npred = 0;
@@ -279,6 +305,36 @@ struct Expr {
         return e;
     }
 
+    static Expr *index(Expr *arr, Expr *index) {
+        // indexing array is 1D. Contains offsets into array.
+        assert(index->sh().ndim == 1);
+
+        Expr *e = new Expr;
+        e->addarg(arr);
+        e->addarg(index);
+        e->ty = ExprType::Index;
+
+
+        // array shape: 3 3 [1 0 0; 0 1 0; 0 0 1]
+        // index set: 1 [1 2]
+        // out[index[0]] = [1 0 0]
+        // out[index[1]] = [0 1 0]
+        // size of out: inner * len(index)
+        e->virtual_sh =
+            arr->sh().removeOutermost().addOutermost(index->sh().vals[0]);
+        e->val = Arr(e->virtual_sh, e->to_str());
+        return e;
+        
+    }
+
+    static Expr *batch(Expr *arr) {
+        Expr *e = new Expr;
+        e->addarg(arr);
+        e->ty = ExprType::Batch;
+        e->val = Arr(arr->sh(), e->to_str());
+        return e;
+    }
+
     // return the expression for the gradient with the other array
     Expr *grad(Arr dx) {
         switch(ty) {
@@ -401,6 +457,27 @@ struct Expr {
                     return;
            }
 
+            case ExprType::Index: {
+                args[0]->force();
+                args[1]->force();
+                // args[0] == array.
+                // args[1] == index set
+                for(int i = 0; i < args[1]->sh().nelem(); ++i) {
+                    const int ix = args[1]->val[i];                    
+                    const int stride = args[0]->sh().removeOutermost().nelem();
+                    // array shape: 3 3 [1 0 0; 0 1 0; 0 0 1]
+                    // index set: 1 [1 2]
+                    // out[index[0]] = [1 0 0]
+                    // out[index[1]] = [0 1 0]
+                    // size of out: inner * len(index)
+                    // hopefully GCC optimises this into a memcpy(...)
+                    for(int j = 0; j < stride; ++i) {
+                        val[stride*i + j] = args[0]->val[stride*ix+j];
+                    }
+                }
+                return;
+          }
+
             default: cerr << to_str(); assert(false && "unhandled"); 
         }
     }
@@ -426,16 +503,24 @@ struct Expr {
             case ExprType::Arr: return val.sh;
             case ExprType::AllOnes: return virtual_sh;
             case ExprType::AllZeros: return virtual_sh;
+            case ExprType::Index: return virtual_sh;
             case ExprType::Tanh: return args[0]->sh();
             case ExprType::Replicate: return virtual_sh;
-            case ExprType::Add: return Shape::unify(args[0]->sh(), args[1]->sh());
-            case ExprType::Sub: return Shape::unify(args[0]->sh(), args[1]->sh());
-            case ExprType::PointwiseMul: return Shape::unify(args[0]->sh(), args[1]->sh());
+            case ExprType::Batch: return args[0]->sh().removeOutermost();
+            case ExprType::Add: 
+                return Shape::unify(args[0]->sh(), args[1]->sh());
+            case ExprType::Sub: 
+                return Shape::unify(args[0]->sh(), args[1]->sh());
+            case ExprType::PointwiseMul:
+                return Shape::unify(args[0]->sh(), args[1]->sh());
             // TODO: find shape of contraction.
-            case ExprType::MatMatMul: return Shape::twod(args[0]->sh()[0], args[1]->sh()[1]);
-            case ExprType::MatVecMul: return Shape::oned(args[0]->sh()[0]);
+            case ExprType::MatMatMul:
+                return Shape::twod(args[0]->sh()[0], args[1]->sh()[1]);
+            case ExprType::MatVecMul:
+                return Shape::oned(args[0]->sh()[0]);
+
             default:
-                assert (false && "unhandled");
+                assert (false && "unimplemented sh()");
         }
     }
 
@@ -475,8 +560,14 @@ struct Expr {
             case ExprType::Replicate: 
                 return "(replicate " + virtual_sh.to_str() + " " + 
                     args[0]->to_str()+ ")";
+
+            case ExprType::Index: 
+                return "(!! " + args[0]->to_str() + " " +
+                            args[1]->to_str() + ")";
+            case ExprType::Batch:
+                return "(batch " + args[0]->to_str() + ")";
             default:
-                assert(false && "unrechable");
+                assert(false && "unimplemented to_str()");
 
         }
     }
@@ -661,8 +752,60 @@ void use_expr() {
         }
 
         Expr *out = Expr::tanh(Expr::add(Expr::matvecmul(Expr::arr(H2O), hiddens[windowsize]), Expr::arr(H2OBias)));
-        cout << "RNN output: " << out->to_str();
+        cout << "RNN output: " << out->to_str() << "\n\n";
+
+
     }
+    
+    {
+        cout << "\n\n\nRNN Computation with batching\n\n\n";
+        // joint modelling of words and corpus
+        static const int batchsize = 2;
+        static const int windowsize = 3;
+        static const int embedsize = 4;
+        static const int hiddensize = 10;
+        vector<int> sentence;
+        vector<Arr> embeds;
+
+        
+        Arr H2H = Arr(hiddensize, hiddensize, "H2H");
+        Arr I2H = Arr(hiddensize, embedsize, "I2H");
+        Arr H2HBias = Arr(hiddensize, "H2HBias");
+
+        Arr H2O = Arr(embedsize, hiddensize, "H2O");
+        Arr H2OBias = Arr(embedsize, "H2OBias");
+
+        for(int i = 0; i < (int)vocab.size(); ++i) {
+            embeds[i] = Arr(embedsize, ix2word[i]);
+        }
+
+        // inputs: batchsize x embedsize
+        Expr *inputs[windowsize];
+        for(int i = 0; i < windowsize; ++i) {
+            inputs[i] = Expr::arr(Arr(batchsize, embedsize, "i_batched" + std::to_string(i)));
+        }
+
+        // outputs array, batchsize x 1
+        Arr output = Arr(batchsize, "output_batched");
+
+        Expr *hiddens[windowsize+1];
+
+        
+        
+        // create the compute kernel
+        hiddens[0] = Expr::arr(Arr(hiddensize, "hinit"));
+        for(int i = 1; i <= windowsize; ++i) {
+            hiddens[i] = Expr::tanh(Expr::add(Expr::matvecmul(Expr::arr(I2H), Expr::batch(inputs[i-1])),
+                        Expr::matvecmul(Expr::arr(H2H), hiddens[i-1])));
+        }
+
+        // should be batchsize x embedsize, but our kernel pretends it is embedsize
+        Expr *predict = Expr::tanh(Expr::add(Expr::matvecmul(Expr::arr(H2O), hiddens[windowsize]), Expr::arr(H2OBias)));
+        cout << "RNN prediction: " << predict->to_str() << "\n\n";
+
+
+    }
+
 
 }
 
@@ -676,6 +819,9 @@ void add_word_to_vocab(string w) {
 bool is_char_word_break(char c) {
     return c == ' ' || c== '\t' || c == '\n' || c == '.';
 }
+
+// disable LSAN. Only keep ASAN. I leak far too much memory ;) 
+extern "C" int __lsan_is_turned_off() { return 1; }
 
 // consume whitespace and get the next word, or empty string if run out.
 string parse_word(FILE *f) {
@@ -757,5 +903,5 @@ int main(int argc, char **argv) {
     }
 
     use_expr();
-
+    
 }
