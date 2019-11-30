@@ -54,8 +54,14 @@ struct Shape {
     }
 
     static Shape unify(Shape sh1, Shape sh2) {
-        assert(sh1.ndim == sh2.ndim);
-        return sh1;
+        Shape smaller, larger;
+        if (sh1.ndim < sh2.ndim) { smaller = sh1; larger = sh2; }
+        else { smaller = sh2; larger = sh1; }
+
+        for(int i = 0; i < smaller.ndim; ++i) {
+            assert(smaller[i] == larger[i]);
+        }
+        return larger;
     }
 
     static Shape oned(int n) {
@@ -160,15 +166,26 @@ struct Expr {
     }
 
     static Expr* add(Expr *l, Expr *r) {
+        if (l->ty == ExprType::AllZeros) return r;
+        if (r->ty == ExprType::AllZeros) return l;
+
+        Shape shunified = Shape::unify(l->sh(), r->sh());
+        l = Expr::replicate(l, shunified);
+        r = Expr::replicate(r, shunified);
+
         Expr *e = new Expr;
         e->ty = ExprType::Add;
         e->addarg(l); 
         e->addarg(r);
-        e->val = Arr(Shape::unify(l->sh(), r->sh()), e->to_str());
+        e->val = Arr(shunified, e->to_str());
         return e;
     }
 
     static Expr* sub(Expr *l, Expr *r) {
+        Shape shunified = Shape::unify(l->sh(), r->sh());
+        l = Expr::replicate(l, shunified);
+        r = Expr::replicate(r, shunified);
+
         Expr *e = new Expr;
         e->ty = ExprType::Sub;
         e->addarg(l); 
@@ -178,6 +195,10 @@ struct Expr {
     }
 
     static Expr *pointwisemul(Expr *l,  Expr *r) {
+        Shape shunified = Shape::unify(l->sh(), r->sh());
+        l = Expr::replicate(l, shunified);
+        r = Expr::replicate(r, shunified);
+
         Expr *e = new Expr;
         e->ty = ExprType::PointwiseMul;
         e->addarg(l);
@@ -211,6 +232,9 @@ struct Expr {
     }
 
     static Expr *replicate(Expr *inner, Shape replicatesh) {
+        // constant fold directly in the replicate()
+        if (inner->sh() == replicatesh) return inner;
+
         Expr *e = new Expr;
         e->ty = ExprType::Replicate;
         e->addarg(inner);
@@ -577,27 +601,27 @@ void use_expr() {
         Expr *m = Expr::arr(arrm);
         Expr *v = Expr::arr(arrv);
 
-        Expr *tanhv = Expr::tanh(v);
-        Expr *dot = Expr::matvecmul(m, tanhv);
-        cout << "\ndot:" << dot->to_str();
-        dot->force();
+        Expr *v2 = Expr::matvecmul(m, v);
+        Expr *tanhv2 = Expr::tanh(v2);
+        cout << "\ndot:" << tanhv2->to_str();
+        tanhv2->force();
 
         cout << "\narrm:"; arrm.print_data();
         cout << "arrv:"; arrv.print_data();
-        cout << "tanhv:"; tanhv->val.print_data();
-        cout << "dot:"; dot->val.print_data();
+        cout << "v2:"; v2->val.print_data();
+        cout << "tanhv2:"; tanhv2->val.print_data();
 
-        Expr *dot_grad_m = dot->grad(arrm);
+        Expr *out_grad_m = tanhv2->grad(arrm);
         for(int i = 0; i < 6; ++i) {
-            cout << "\n" << i << "|dot->grad[m]:" << dot_grad_m->to_str();
-            dot_grad_m = constantfold(dot_grad_m);
+            cout << "\n" << i << "|out->grad[m]:" << out_grad_m->to_str();
+            out_grad_m = constantfold(out_grad_m);
         }
 
         cout << "\n\n";
-        Expr *dot_grad_v = dot->grad(arrv);
+        Expr *out_grad_v = tanhv2->grad(arrv);
         for(int i = 0; i < 6; ++i) {
-        cout << "\n" << i << "| dot->grad[v]:" << dot_grad_v->to_str();
-            dot_grad_v = constantfold(dot_grad_v);
+        cout << "\n" << i << "| out->grad[v]:" << out_grad_v->to_str();
+            out_grad_v = constantfold(out_grad_v);
         }
         // cout << "\ndot der wrt a:" << dot->grad("b");
     }
