@@ -39,7 +39,7 @@ struct Shape {
         return n;
     }
 
-    int operator [](int dim) {
+    int operator [](int dim) const {
         assert(dim >= 0);
         assert(dim < ndim);
         return vals[dim];
@@ -107,7 +107,7 @@ struct Shape {
         return sh;
     }
 
-    string to_str() {
+    string to_str() const {
         string s =  "sh[";
         for(int i = 0; i < ndim; ++i) {
             s += to_string(vals[i]) + (i < ndim - 1 ? " " : "");
@@ -708,7 +708,7 @@ struct Expr {
     }
 
 
-    string to_str() {
+    string to_str() const {
         switch(ty) {
             case ExprType::Arr: return val.name;
             case ExprType::AllOnes: return "11..1";
@@ -768,6 +768,36 @@ struct Expr {
     
 };
 
+enum class StmtType {
+    Assign,
+    AddAssign,
+};
+
+struct Stmt {
+    Arr lhs;
+    Expr *rhs;
+    StmtType ty;
+
+    Stmt assign(Arr lhs, Expr *rhs) const {
+        Stmt s;
+        s.lhs = lhs;
+        s.rhs = rhs;
+        s.ty = StmtType::Assign;
+        return s;
+    }
+
+    Stmt addassign(Arr lhs, Expr *rhs) const {
+        Stmt s;
+        s.lhs = lhs;
+        s.rhs = rhs;
+        s.ty = StmtType::AddAssign;
+        return s;
+    }
+};
+
+using StmtList = vector<Stmt>;
+
+
 bool isexprconstant(const Expr *e) {
     switch(e->ty) {
         case ExprType::AllOnes:
@@ -777,7 +807,7 @@ bool isexprconstant(const Expr *e) {
     }
 }
 
-void getSubexpressions(Expr *e, set<Expr> &s) {
+void getSubexpressions(Expr *e, map<Expr, int> &s) {
 
     switch(e->ty) {
         case ExprType::Arr: return;
@@ -787,14 +817,14 @@ void getSubexpressions(Expr *e, set<Expr> &s) {
         case ExprType::Dot:
         case ExprType::MatMatMul:
         case ExprType::MatVecMul:
-            s.insert(*e);
+            s[*e] += 1;
             getSubexpressions(e->args[0], s);
             getSubexpressions(e->args[1], s);
             return;
 
         case ExprType::Tanh:
         case ExprType::DerTanh:
-            s.insert(*e);
+            s[*e] += 1;
             getSubexpressions(e->args[0], s);
             return;
 
@@ -806,12 +836,12 @@ void getSubexpressions(Expr *e, set<Expr> &s) {
 }
 
 Expr *commonSubexpressionElimination(Expr *e) {
-    set<Expr> s;
+    map<Expr, int> s;
     getSubexpressions(e, s);
 
     cout << "subexpressions:\n";
-    for(Expr e : s) {
-        cout << "**---" << e.to_str() << "\n";
+    for(auto it : s) {
+        cout << "**--- " << it.second << ":" << it.first.to_str() << "\n";
     }
     exit(0);
 
@@ -895,7 +925,7 @@ Expr *constantfold(Expr *e) {
     }
 }
 
-void use_expr() { 
+void test_expr_let_bindings() {
     {
         cout << "Let bindings\n\n";
 
@@ -908,6 +938,9 @@ void use_expr() {
         cout << "a^4: " << afour->to_str() << "\n\n";
         cout << "a^4->grad[a]: " << afour->grad(arra)->to_str() << "\n\n";
     }
+}
+
+void test_expr_dot() {
     {
     const int N = 3;
     Arr arra = Arr(N, "a");
@@ -941,46 +974,9 @@ void use_expr() {
 
     cout << " | simpl " << dotder->to_str();
     }
+}
 
-    {
-
-        const int M = 3;
-        const int N = 3;
-        Arr arrm= Arr(M, N, "m");
-        Arr arrv = Arr(N, "v");
-        for(int i = 0; i < M; ++i) 
-            for(int j = 0; j < N; ++j)
-                arrm[i*M+j] = i == j ? 1 : 0;
-        for(int i = 0; i < N; ++i) arrv[i] = i;
-
-        Expr *m = Expr::arr(arrm);
-        Expr *v = Expr::arr(arrv);
-
-        Expr *v2 = Expr::matvecmul(m, v);
-        Expr *tanhv2 = Expr::tanh(v2);
-        cout << "\ndot:" << tanhv2->to_str();
-        tanhv2->force();
-
-        cout << "\narrm:"; arrm.print_data();
-        cout << "arrv:"; arrv.print_data();
-        cout << "v2:"; v2->val.print_data();
-        cout << "tanhv2:"; tanhv2->val.print_data();
-
-        Expr *out_grad_m = tanhv2->grad(arrm);
-        for(int i = 0; i < 6; ++i) {
-            cout << "\n" << i << "|out->grad[m]:" << out_grad_m->to_str();
-            out_grad_m = constantfold(out_grad_m);
-        }
-
-        cout << "\n\n";
-        Expr *out_grad_v = tanhv2->grad(arrv);
-        for(int i = 0; i < 6; ++i) {
-        cout << "\n" << i << "| out->grad[v]:" << out_grad_v->to_str();
-            out_grad_v = constantfold(out_grad_v);
-        }
-        // cout << "\ndot der wrt a:" << dot->grad("b");
-    } 
-
+void test_expr_rnn() {
     {
         cout << "\n\n\nRNN Computation\n\n\n";
         // joint modelling of words and corpus
@@ -1031,6 +1027,9 @@ void use_expr() {
         }
 
     }
+}
+
+void test_expr_rnn_batched() {
 
     
     {
@@ -1108,7 +1107,6 @@ void use_expr() {
 
 
     }   
-
 
 }
 
@@ -1205,6 +1203,8 @@ int main(int argc, char **argv) {
         cout << "\n";
     }
 
-    use_expr();
+    // use_expr();
+    test_expr_dot();
+    test_expr_rnn_batched();
     
 }
