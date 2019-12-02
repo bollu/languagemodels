@@ -298,7 +298,7 @@ struct Expr {
     } 
 
     bool operator == (const Expr &other) {
-        return !(*this == other);
+        return !(*this != other);
     }
 
     static Expr *arr(string name, Shape sh) {
@@ -493,19 +493,6 @@ struct Expr {
         return e;
     }
 
-    /*
-    static Expr *let(Arr lhs, Expr *rhs, Expr *in) {
-        Expr *e = new Expr;
-        e->ty = ExprType::Let;
-        e->val = lhs;
-        e->args[0] = rhs;
-        e->args[1] = in;
-        e->sh = in->sh;
-        // assert(e->val.sh == e->args[0]->sh);
-        return e;
-    } 
-    */
-
     Expr *grad(Expr *dx) {
         assert(dx->ty == ExprType::Arr);
         return grad_(dx, dx->sh, {{dx->arrname, Expr::allones(dx->sh)}});
@@ -515,19 +502,6 @@ struct Expr {
     // return the expression for the gradient with the other array
     Expr *grad_(Expr *dx, Shape outsh, map<string, Expr *> dermap) {
         switch(ty) {
-            /*
-            case ExprType::Let: {
-                Arr darr = Arr(val.sh, "d" + val.name);
-                Expr *darrval =  args[0]->grad_(dx, val.sh, dermap);
-
-                // construct the derivative of dx wrt to the knowledge that the
-                // derivative of the let is darr.
-                dermap[val.name] = Expr::arr(darr);
-                Expr *inner = args[1]->grad_(dx, outsh, dermap);
-
-                return Expr::let(darr, darrval, Expr::let(val, args[0], inner));
-            }
-            */
             case ExprType::Arr:  {
                 // find this array in the derivative map.
                 auto it = dermap.find(this->arrname);                
@@ -570,167 +544,6 @@ struct Expr {
                 assert(false && "unimplemented");
         }
     }
-    
-    /*
-    void force() {
-        switch(ty) {
-            case ExprType::Arr: return;
-            case ExprType::AllOnes: return;
-            case ExprType::Add: {
-                    args[0]->force();
-                    args[1]->force();
-                for(int i = 0; i < args[0]->sh.nelem(); ++i) {
-                    val[i] = args[0]->at(i) + args[1]->at(i);
-                }
-                return;
-            }
-            case ExprType::Sub: {
-                    args[0]->force();
-                    args[1]->force();
-                for(int i = 0; i < args[0]->sh.nelem(); ++i) {
-                    val[i] = args[0]->at(i) - args[1]->at(i);
-                }
-                return;
-            }
-            case ExprType::Dot:
-                    args[0]->force();
-                    args[1]->force();
-                    val[0] = 0;
-                    assert(args[0]->sh.ndim == 1);
-                    assert(args[1]->sh.ndim == 1);
-
-                    for(int i = 0; i < args[0]->sh.nelem(); ++i) {
-                        val[0] += args[0]->at(i) * args[1]->at(i);
-                    }
-                    return;
-            case ExprType::PointwiseMul:
-                    args[0]->force();
-                    args[1]->force();
-                    for(int i = 0; i < args[0]->sh.nelem(); ++i) {
-                            val[i] = args[0]->at(i) * args[1]->at(i);
-                    }
-                    return;
-
-            case ExprType::Tanh: 
-                    args[0]->force();
-                    for(int i = 0; i < args[0]->sh.nelem(); ++i) {
-                        val[i] = tanhf(args[0]->at(i));
-                    }
-                    return;
-
-
-            case ExprType::MatMatMul: {
-                    args[0]->force();
-                    args[1]->force();
-
-                    int M = args[0]->sh[0];
-                    int N = args[0]->sh[1];
-                    assert(N == args[1]->sh[0]);
-                    int O = args[1]->sh[1];
-
-                    for(int i = 0; i < M; ++i) {
-                        for(int j = 0; j < O; ++j) {
-                            val[i*M+j] = 0;
-                            for(int k = 0; k < N; ++k ) {
-                                val[i*M+j] += args[0]->at(i*N+k) * args[1]->at(k*M+j);
-                            }
-
-                        }
-                    }
-                    return;
-           }
-
-            case ExprType::MatVecMul: {
-                    args[0]->force();
-                    args[1]->force();
-
-                    int M = args[0]->sh[0];
-                    int N = args[0]->sh[1];
-                    assert(N == args[1]->sh[0]);
-
-                    for(int i = 0; i < M; ++i) {
-                        val[i] = 0;
-                        for(int j = 0; j < N; ++j) {
-                                val[j] += args[0]->at(i*N+j) * args[1]->at(j);
-                            }
-
-                    }
-                    return;
-           }
-
-            case ExprType::Index: {
-                args[0]->force();
-                args[1]->force();
-                // args[0] == array.
-                // args[1] == index set
-                for(int i = 0; i < args[1]->sh.nelem(); ++i) {
-                    const int ix = args[1]->val[i];                    
-                    const int stride = args[0]->sh.removeOutermost().nelem();
-                    // array shape: 3 3 [1 0 0; 0 1 0; 0 0 1]
-                    // index set: 1 [1 2]
-                    // out[index[0]] = [1 0 0]
-                    // out[index[1]] = [0 1 0]
-                    // size of out: inner * len(index)
-                    // hopefully GCC optimises this into a memcpy(...)
-                    for(int j = 0; j < stride; ++i) {
-                        val[stride*i + j] = args[0]->val[stride*ix+j];
-                    }
-                }
-                return;
-          }
-
-          default: cerr << to_str(); assert(false && "unhandled"); 
-        }
-    }
-    */
-
-    /*
-    float at(int ix) { 
-        switch(ty) {
-            case ExprType::AllOnes:
-                return 1;
-            case ExprType::AllZeros:
-                return 0;
-            case ExprType::Replicate:
-                // find the value of the index wrt the replication
-                // a[i, j, k] -> a[i]
-                return args[0]->at(ix % args[0]->sh.nelem());
-
-            default:
-                return val[ix];
-        }
-    }
-    */
-
-        /*
-        switch(ty) {
-            case ExprType::Arr: return sh;
-            case ExprType::AllOnes: return sh;
-            case ExprType::AllZeros: return sh;
-            case ExprType::Index: return sh;
-            case ExprType::Unbatch: return sh;
-            case ExprType::Replicate: return sh;
-            case ExprType::Tanh: return args[0]->sh;
-            case ExprType::DerTanh: return args[0]->sh;
-            case ExprType::Batch: return args[0]->sh.removeOutermost();
-            case ExprType::Constant: return Shape::zerod(); 
-            case ExprType::Add: 
-                return Shape::unify(args[0]->sh, args[1]->sh);
-            case ExprType::Sub: 
-                return Shape::unify(args[0]->sh, args[1]->sh);
-            case ExprType::PointwiseMul:
-                return Shape::unify(args[0]->sh, args[1]->sh);
-            // TODO: find shape of contraction.
-            case ExprType::MatMatMul:
-                return Shape::twod(args[0]->sh[0], args[1]->sh[1]);
-            case ExprType::MatVecMul:
-                return Shape::oned(args[0]->sh[0]);
-
-            default:
-                assert (false && "unimplemented sh()");
-        }
-        */
-
 
     string to_str() const {
         switch(ty) {
@@ -781,11 +594,6 @@ struct Expr {
                     args[0]->to_str() + ")";
             case ExprType::Constant:
                 return "(constant " + to_string(constval) + ")";
-            /*
-            case ExprType::Let:
-                return "(let " + ame + " := " + args[0]->to_str() +  
-                    " in " + args[1]->to_str() + ")";
-            */
             default:
                 assert(false && "unimplemented to_str()");
 
@@ -956,20 +764,6 @@ Expr *simplify(Expr *e) {
     return e;
 }
 
-/*
-void test_expr_let_bindings() {
-        cout << "Let bindings\n\n";
-
-        const int N = 3;
-        Arr arra = Arr(N, "a");
-        Arr asq = Arr(N, "asq");
-
-        Expr *afour = Expr::add(Expr::arr(arra), Expr::add(Expr::arr(asq), Expr::arr(asq)));
-        afour = Expr::let(asq, Expr::add(Expr::arr(arra), Expr::arr(arra)), afour);
-        cout << "a^4: " << afour->to_str() << "\n\n";
-        cout << "a^4->grad[a]: " << afour->grad(arra)->to_str() << "\n\n";
-}
-*/
 
 void test_expr_dot() {
     cout << "***dot***\n";
