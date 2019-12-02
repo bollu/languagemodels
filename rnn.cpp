@@ -200,6 +200,7 @@ enum class ExprType {
     Arr, 
     Undef, 
     AllOnes, 
+    Identity, 
     AllZeros,
     // select a sub array from a given array. Used for embedding indexing.
     Index,
@@ -438,6 +439,14 @@ struct Expr {
     }
 
 
+    static Expr *identity(Shape sh) {
+        Expr *e = new Expr;
+        e->ty = ExprType::Identity;
+        e->sh = sh;
+        return e;
+    }
+
+
     static Expr *allzeros(Shape sh) {
         Expr *e = new Expr;
         e->ty = ExprType::AllZeros;
@@ -495,7 +504,7 @@ struct Expr {
 
     Expr *grad(Expr *dx) {
         assert(dx->ty == ExprType::Arr);
-        return grad_(dx, dx->sh, {{dx->arrname, Expr::allones(dx->sh)}});
+        return grad_(dx, dx->sh, {});
     }
 
 
@@ -503,20 +512,36 @@ struct Expr {
     Expr *grad_(Expr *dx, Shape outsh, map<string, Expr *> dermap) {
         switch(ty) {
             case ExprType::Arr:  {
+                assert(dx->ty == ExprType::Arr);
+                if (dx->arrname == this->arrname) {
+                    return Expr::identity(outsh);
+                }
+                else {
+                    return Expr::allzeros(outsh);
+                }
                 // find this array in the derivative map.
-                auto it = dermap.find(this->arrname);                
-                 // if it's in the map, return the value
-                if (it != dermap.end()) { return new Expr(*it->second); }
-                else { return Expr::allzeros(sh); }
+                // auto it = dermap.find(this->arrname);                
+                //  // if it's in the map, return the value
+                // if (it != dermap.end()) { return new Expr(*it->second); }
+                // else { return Expr::allzeros(sh); }
 
              }
             case ExprType::Add:
                 return Expr::add(args[0]->grad_(dx, outsh, dermap), args[1]->grad_(dx, outsh, dermap));
             case ExprType::Sub:
                 return Expr::sub(args[0]->grad_(dx, outsh, dermap), args[1]->grad_(dx, outsh, dermap));
-            case ExprType::Dot:
-                return Expr::add(Expr::pointwisemul(args[0]->grad_(dx, outsh, dermap), args[1]),
-                        Expr::pointwisemul(args[0], args[1]->grad_(dx, outsh, dermap)));
+            case ExprType::Dot: {
+                // dl x r = outsh
+                // dl = outsh x r[0]
+                Expr *l = args[0], *r = args[1];
+                // dr x l = outsh
+                // dr = outsh x l[0]
+                Expr *dl = l->grad_(dx, Shape::twod(outsh[0], r->sh[0]), dermap);
+                Expr *dr = r->grad_(dx, Shape::twod(outsh[0], l->sh[0]), dermap);
+                return Expr::add(Expr::matvecmul(dl, r), Expr::matvecmul(dr, l));
+            }
+                // return Expr::add(Expr::pointwisemul(args[0]->grad_(dx, outsh, dermap), args[1]),
+                //         Expr::pointwisemul(args[0], args[1]->grad_(dx, outsh, dermap)));
             // d/dx [tanh(i)] = tanh'(i) . di/dx
             case ExprType::Tanh: {
                 Expr *dinner = args[0]->grad_(dx, args[0]->sh, dermap);
@@ -530,10 +555,10 @@ struct Expr {
                }
             case ExprType::MatVecMul: {
                    // TODO!! What is the justification for the "fit shape"??
-                   // (d/dN(M x) = M [dx/dN] + [dM/dy]
                    return Expr::add(
                            Expr::replicate(Expr::matvecmul(args[0]->grad_(dx, args[0]->sh, dermap), args[1]), outsh),
                            Expr::replicate(Expr::matvecmul(args[0], args[1]->grad_(dx, args[1]->sh, dermap)), outsh));
+                   return Expr::allzeros(outsh);
                }
             case ExprType::Batch: {
                 return Expr::batch(args[0]->grad_(dx, args[0]->sh, dermap));
@@ -549,6 +574,7 @@ struct Expr {
         switch(ty) {
             case ExprType::Arr: return arrname;
             case ExprType::AllOnes: return "11..1";
+            case ExprType::Identity: return "id(1010)";
             case ExprType::AllZeros: return "00..0";
             case ExprType::Add: 
                 return "(+ " + args[0]->to_str() + " " + 
@@ -703,10 +729,10 @@ Expr *constantfold(Expr *e) {
                     e->args[1]->ty == ExprType::AllZeros) {
                 return Expr::allzeros(e->sh);
             }
-            if (e->args[0]->ty == ExprType::AllOnes) {
+            if (e->args[0]->ty == ExprType::Identity) {
                 return constantfold(e->args[1]);
             }
-            if (e->args[1]->ty == ExprType::AllOnes) {
+            if (e->args[1]->ty == ExprType::Identity) {
                 return constantfold(e->args[0]);
             }
             return Expr::matvecmul(constantfold(e->args[0]), constantfold(e->args[1]));
@@ -790,6 +816,20 @@ void test_expr_dot() {
     }
     cout << " | simpl " << dotder->to_str();
     cout << "\n";
+}
+
+void test_expr_matvec() {
+    cout << "***Ax***\n";
+    static const int N = 3;
+    static const int M = 5;
+    Expr *A = Expr::arr("A", Shape::twod(N, M));
+    Expr *x = Expr::arr("x", Shape::oned(M));
+
+    Expr *out = Expr::matvecmul(A, x);
+    cout << "out: " << out->to_str() << "\n";
+    cout << "out->grad[A]: " << out->grad(A)->to_str() << "\n";
+    cout << "out->grad[A]: " << simplify(out->grad(A))->to_str() << "\n";
+    cout << "out->grad[x]: " << simplify(out->grad(x))->to_str() << "\n";
 }
 
 
@@ -1030,7 +1070,7 @@ int main(int argc, char **argv) {
 
     // use_expr();
     test_expr_dot();
+    test_expr_matvec();
     test_expr_tanh_matvec();
     test_expr_rnn_batched();
-    
 }
