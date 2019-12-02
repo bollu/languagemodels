@@ -772,30 +772,6 @@ struct EliminateContractionVisitor : public ExprVisitor {
 };
 
 
-Expr *pushContractionsInwards(Expr *e) {
-    if (Add *a = dynamic_cast<Add *>(e)) {
-        vector<Expr *> inner;
-        for(Expr *e : a->inner) inner.push_back(pushContractionsInwards(e));
-        return new Add(inner);
-    }
-    if (Mul *m = dynamic_cast<Mul *>(e)) {
-        vector<Expr *> inner;
-        for(Expr *e : m->inner) inner.push_back(pushContractionsInwards(e));
-        return new Mul(inner);
-    }
-    // (>< (+ a b c)) = (+ (>< a) (>< b) (>< c))
-    else if (Contract *c = dynamic_cast<Contract *>(e)) {
-        Add *a = dynamic_cast<Add *>(c->inner);
-        vector<Expr *> inner;
-        for(Expr *e : a->inner) {
-            inner.push_back(new Contract(c->ix, pushContractionsInwards(e)));
-        }
-        return new Add(inner);
-
-    }
-    return e;
-}
-
 // convert (+ (+ a b) (+ c d)) to (+ a b c d) and similary
 // for multiplication
 struct FlattenVisitor : public ExprVisitor {
@@ -826,73 +802,6 @@ struct FlattenVisitor : public ExprVisitor {
     }
 };
 
-
-// move dirac deltas leftwards
-/*
-Expr *reassocDelta(Expr *e) {
-    if (Add *a = dynamic_cast<Add *>(e)) {
-        return new Add(reassocDelta(a->l), reassocDelta(a->r));
-    } else if (Mul *m = dynamic_cast<Mul *>(e)) {
-        if (Delta *dr = dynamic_cast<Delta *>(m->r)) {
-            return new Mul(dr, reassocDelta(m->l));
-        } else {
-            return new Mul(reassocDelta(m->l), reassocDelta(m->r));
-        }
-    } else if (Contract *c = dynamic_cast<Contract *>(e)) {
-        return new Contract(c->ix, reassocDelta(c->inner));
-    }
-    return e;
-}
-
-// eliminate (>< i (* (δ i->j) t1)) with t1[i/j]
-Expr *eliminateContractions(Expr *e)  {
-    if (Add *a = dynamic_cast<Add *>(e)) {
-        return new Add(eliminateContractions(a->l), eliminateContractions(a->r));
-    }
-    else if (Mul *m = dynamic_cast<Mul *>(e)) {
-        return new Mul(eliminateContractions(m->l), eliminateContractions(m->r));
-    } else if (Contract *c = dynamic_cast<Contract *>(e)) {
-        if (!c) return e;
-        Mul *m = dynamic_cast<Mul *>(c->inner);
-        if (!m) return e;
-        Delta *d = dynamic_cast<Delta *>(m->l);
-        if (!d) return e;
-
-        if (c->ix == d->old) {
-            return m->r->subst(d->old, d->new_);
-        }
-    }
-
-    return e;
-};
-*/
-
-
-/*
-Expr *constantFold(Expr *e) {
-    if (Mul *m = dynamic_cast<Mul*>(e)) {
-        if (is_const_zero(m->l)) return new ConstantInt(0);
-        if (is_const_zero(m->r)) return new ConstantInt(0);
-        if (is_const_one(m->r)) return m->l;
-        if (is_const_one(m->l)) return m->r;
-    }
-
-    if (Add *a = dynamic_cast<Add*>(e)) {
-        if (is_const_zero(a->l)) return a->r;
-        if (is_const_zero(a->r)) return a->l;
-
-        return new Add(constantFold(a->l), constantFold(a->r));
-    }
-
-    if (Contract *c = dynamic_cast<Contract*>(e)) {
-        // contracting over zero is just 0
-        if (is_const_zero(c->inner)) { return new ConstantInt(0); }
-        return new Contract(c->ix, constantFold(c->inner));
-    }
-
-    return e;
-}
-*/
 
 Expr *simplify(Expr *e, bool debug) {
     PushContractionInwardsVisitor pushv;
