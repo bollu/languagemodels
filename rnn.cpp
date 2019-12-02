@@ -140,6 +140,7 @@ struct Shape {
 };
 
 // only 1D frrays
+/*
 struct Arr {
     Shape sh;
     float *data = nullptr;
@@ -184,930 +185,657 @@ struct Arr {
         return !(*this == other);
     }
 };
+*/
 
 enum class ExprType {
     Add,
-    Sub,
-    Dot, 
-    MatMatMul, 
-    MatVecMul,
-    Replicate,
-    PointwiseMul,
-    // constant aray
-    Constant,
-    Tanh,
-    DerTanh,
-    Arr, 
-    Undef, 
-    AllOnes, 
-    AllZeros,
-    // select a sub array from a given array. Used for embedding indexing.
-    Index,
-    // define a batch dimensions
-    Batch,
-    // unbatch a batch dimension to specify final computation of gradient update
-    Unbatch,
-    // let bindings. 
-    Let, 
+    Mul,
+    Undef,
+    Arr,
+    Slice,
+    Contract,
+    Delta,
+    ConstantInt
 };
 
-static const int MAXARGS = 30;
-static const int MAXPRED = 30;
+struct Index {
+    string name;
+    Index(string name) : name(name) {};
+
+    bool operator == (const Index &other) const { return name == other.name; }
+    bool operator != (const Index &other) const { return name != other.name; }
+    bool operator < (const Index &other) const { return name < other.name; }
+
+    string to_str() const { return name; };
+};
+
+struct Slice;
 
 struct Expr {
+    // gives type of expression
     ExprType ty = ExprType::Undef;
-    Arr val;
-    // if it's a virtual node such as AllZeros, AllOnes, this will be its
-    // length.
-    Shape virtual_sh;
+    Expr(ExprType ty): ty(ty) {};
 
-    Expr *args[MAXARGS] = { nullptr };
-    int nargs = 0;
+    Expr *ix(vector<Index> ix);
+    Expr *ix(Index ix1);
+    Expr *ix(Index ix, Index ix2);
 
-    // constant float for Constant
-    float constval;
+    Expr *contract(Index ix);
 
-    void addarg(Expr *e) {
-        assert(nargs < MAXARGS);
-        args[nargs++] = e;
-        // assert(e->npred < MAXPRED);
-        // e->pred[e->npred++] = this;
+    // print as string
+    virtual string to_str() const = 0;
+
+    // return free indeces
+    virtual set<Index> free() const = 0;
+
+    // substitute old indeces for new indeces.
+    virtual Expr *subst(Index old, Index new_) const = 0;
+
+    // creates dirac deltas by taking gradients
+    virtual Expr *grad(string name, vector<Index> ixs) = 0;
+
+    string detailed_to_str() const {
+        string s = to_str();
+        s += "[";
+        for(Index i : free()) s += i.name + ",";
+        s += "]";
+        return s;
     }
 
-    Expr() = default;
-    Expr(const Expr &other) = default;
-
-    bool operator > (const Expr &other) const {
-        return (other < *this) && (other != *this);
-    }
-
-    bool operator < (const Expr &other) const {
-        if (ty < other.ty) { return true; }
-        if (ty > other.ty) { return false; }
-        
-        if (val.name < other.val.name) { return true; }
-        if (val.name > other.val.name) { return false; }
-        /*
-        if ((ty == ExprType::AllOnes || ty == ExprType::AllZeros || ty ==
-                    ExprType::Index || ty == ExprType::Unbatch || ty ==
-                    ExprType :: Replicate) && (virtual_sh < other.virtual_sh)) {
-            return true;
-        }
-        */
-
-        if (nargs < other.nargs) return true;
-        if (nargs > other.nargs) return false;
-        assert(nargs == other.nargs);
-        for(int i = 0; i < nargs; ++i) {
-            if (*args[i] < *other.args[i]) return true;
-            if (*args[i] > *other.args[i]) return false;
-        }
-        // predecessors don't matter since we never use them.
-
-        if (ty == ExprType::Constant && constval < other.constval) { 
-            return true; 
-        }
-        if (ty == ExprType::Constant && constval > other.constval) { 
-            return false; 
-        }
-
-        return false;
-    } 
-
-    bool operator != (const Expr &other) const {
-        if (ty != other.ty) { return true; }
-        if (val != other.val) { return true; }
-        if ((ty == ExprType::AllOnes || ty == ExprType::AllZeros || ty ==
-                    ExprType::Index || ty == ExprType::Unbatch || ty ==
-                    ExprType :: Replicate) && virtual_sh != other.virtual_sh) {
-            return true;
-        }
-
-        if (nargs != other.nargs) return true;
-        for(int i = 0; i < nargs; ++i) {
-            if (*args[i] != *other.args[i]) return true;
-        }
-        // predecessors don't matter since we never use them.
-
-        if (ty == ExprType::Constant && constval != other.constval) { 
-            return true; 
-        }
-
-        return false;
-    } 
-
-    bool operator == (const Expr &other) {
-        return !(*this == other);
-    }
-
-    static Expr *arr(Arr a) {
-        Expr *e = new Expr;
-        e->val = a;
-        e->ty = ExprType::Arr;
-        return e;
-    }
-
-    static Expr* add(Expr *l, Expr *r) {
-        if (l->ty == ExprType::AllZeros) return r;
-        if (r->ty == ExprType::AllZeros) return l;
-
-        Shape shunified = Shape::unify(l->sh(), r->sh());
-        l = Expr::replicate(l, shunified);
-        r = Expr::replicate(r, shunified);
-
-        Expr *e = new Expr;
-        e->ty = ExprType::Add;
-        e->addarg(l); 
-        e->addarg(r);
-        e->val = Arr(shunified, e->to_str());
-        return e;
-    }
-
-    static Expr* sub(Expr *l, Expr *r) {
-        Shape shunified = Shape::unify(l->sh(), r->sh());
-        l = Expr::replicate(l, shunified);
-        r = Expr::replicate(r, shunified);
-
-        Expr *e = new Expr;
-        e->ty = ExprType::Sub;
-        e->addarg(l); 
-        e->addarg(r);
-        e->val = Arr(Shape::unify(l->sh(), r->sh()), e->to_str());
-        return e;
-    }
-
-    static Expr *pointwisemul(Expr *l,  Expr *r) {
-        Shape shunified = Shape::unify(l->sh(), r->sh());
-        l = Expr::replicate(l, shunified);
-        r = Expr::replicate(r, shunified);
-
-        Expr *e = new Expr;
-        e->ty = ExprType::PointwiseMul;
-        e->addarg(l);
-        e->addarg(r);
-        return e;
-    }
-
-    static Expr *matmatmul(Expr *l, Expr *r) {
-        Expr *e = new Expr;
-        e->ty = ExprType::MatMatMul;
-        e->addarg(l);
-        e->addarg(r);
-        assert(l->sh().ndim == 2);
-        assert(r->sh().ndim == 2);
-        assert(l->sh()[1] == r->sh()[0]);
-        e->val = Arr(Shape::twod(l->sh()[0], r->sh()[1]), e->to_str());
-        return e;
-    }
-
-    static Expr *matvecmul(Expr *l, Expr *r) {
-        Expr *e = new Expr;
-        e->ty = ExprType::MatVecMul;
-        e->addarg(l);
-        e->addarg(r);
-
-        assert(l->sh().ndim == 2);
-        assert(r->sh().ndim == 1);
-        assert(l->sh()[1] == r->sh()[0]);
-        e->val = Arr(r->sh(), e->to_str());
-        return e;
-
-    }
-
-    static Expr *replicate(Expr *inner, Shape replicatesh) {
-        // constant fold directly in the replicate()
-        if (inner->sh() == replicatesh) return inner;
-
-        Expr *e = new Expr;
-        e->ty = ExprType::Replicate;
-        e->addarg(inner);
-        // the new shape is that of the shape we want to replicate to
-        e->virtual_sh = replicatesh;
-        return e;
-    }
-
-
-    static Expr *dot(Expr *l, Expr *r) {
-        Expr *e = new Expr;
-        e->ty = ExprType::Dot;
-        e->addarg(l); 
-        e->addarg(r);
-
-        // assert(this->sh() == other->sh());
-        e->val = Arr(1, e->to_str());
-        return e;
-    }
-
-    static Expr *tanh(Expr *inner) {
-        Expr *e = new Expr;
-        e->ty = ExprType::Tanh;
-        e->addarg(inner);
-        e->val = Arr(inner->sh(), e->to_str());
-        return e;
-    }
-
-    static Expr *dertanh(Expr *inner) {
-        Expr *e = new Expr;
-        e->ty = ExprType::DerTanh;
-        e->addarg(inner);
-        e->val = Arr(inner->sh(), e->to_str());
-        return e;
-    }
-
-
-    static Expr *allones(Shape sh) {
-        Expr *e = new Expr;
-        e->ty = ExprType::AllOnes;
-        e->virtual_sh = sh;
-        return e;
-    }
-
-
-    static Expr *allzeros(Shape sh) {
-        Expr *e = new Expr;
-        e->ty = ExprType::AllZeros;
-        e->virtual_sh = sh;
-        return e;
-    }
-
-    static Expr *index(Expr *arr, Expr *index) {
-        // indexing array is 1D. Contains offsets into array.
-        assert(index->sh().ndim == 1);
-
-        Expr *e = new Expr;
-        e->addarg(arr);
-        e->addarg(index);
-        e->ty = ExprType::Index;
-
-
-        // array shape: 3 3 [1 0 0; 0 1 0; 0 0 1]
-        // index set: 1 [1 2]
-        // out[index[0]] = [1 0 0]
-        // out[index[1]] = [0 1 0]
-        // size of out: inner * len(index)
-        e->virtual_sh =
-            arr->sh().removeOutermost().addOutermost(index->sh().vals[0]);
-        e->val = Arr(e->virtual_sh, e->to_str());
-        return e;
-        
-    }
-
-    static Expr *batch(Expr *arr) {
-        Expr *e = new Expr;
-        e->addarg(arr);
-        e->ty = ExprType::Batch;
-        e->val = Arr(arr->sh(), e->to_str());
-        return e;
-    }
-
-    static Expr *unbatch(Expr *arr, int batchsize) {
-        Expr *e = new Expr;
-        e->addarg(arr);
-        e->ty = ExprType::Unbatch;
-        // TODO: check that this matches the inner Batch() sizes.
-        e->virtual_sh = arr->sh().addOutermost(batchsize); 
-        e->val = Arr(e->virtual_sh, e->to_str());
-        return e;
-    }
-
-    static Expr *constant(float c) {
-        Expr *e = new Expr;
-        e->ty = ExprType::Constant;
-        e->constval = c;
-        e->virtual_sh = Shape::zerod();
-        e->val = Arr(e->virtual_sh, e->to_str());
-        return e;
-    }
-
-    static Expr *let(Arr lhs, Expr *rhs, Expr *in) {
-        Expr *e = new Expr;
-        e->ty = ExprType::Let;
-        e->val = lhs;
-        e->args[0] = rhs;
-        e->args[1] = in;
-        assert(e->val.sh == e->args[0]->sh());
-        return e;
-    }  
-
-    Expr *grad(Arr dx) {
-        return grad_(dx, dx.sh, {{dx.name, Expr::allones(dx.sh)}});
-    }
-
-
-    // return the expression for the gradient with the other array
-    Expr *grad_(Arr dx, Shape outsh, map<string, Expr *> dermap) {
-        switch(ty) {
-            case ExprType::Let: {
-                Arr darr = Arr(val.sh, "d" + val.name);
-                Expr *darrval =  args[0]->grad_(dx, val.sh, dermap);
-
-                // construct the derivative of dx wrt to the knowledge that the
-                // derivative of the let is darr.
-                dermap[val.name] = Expr::arr(darr);
-                Expr *inner = args[1]->grad_(dx, outsh, dermap);
-
-                return Expr::let(darr, darrval, Expr::let(val, args[0], inner));
-            }
-            case ExprType::Arr:  {
-                // find this array in the derivative map.
-                auto it = dermap.find(this->val.name);                
-                 // if it's in the map, return the value
-                if (it != dermap.end()) { return new Expr(*it->second); }
-                else { return Expr::allzeros(sh()); }
-
-             }
-            case ExprType::Add:
-                return Expr::add(args[0]->grad_(dx, outsh, dermap), args[1]->grad_(dx, outsh, dermap));
-            case ExprType::Sub:
-                return Expr::sub(args[0]->grad_(dx, outsh, dermap), args[1]->grad_(dx, outsh, dermap));
-            case ExprType::Dot:
-                return Expr::add(Expr::pointwisemul(args[0]->grad_(dx, outsh, dermap), args[1]),
-                        Expr::pointwisemul(args[0], args[1]->grad_(dx, outsh, dermap)));
-            // (1 - tanh^2 X) .* X'
-            case ExprType::Tanh: {
-                Expr *dinner = args[0]->grad_(dx, args[0]->sh(), dermap);
-                return Expr::pointwisemul(Expr::dertanh(args[0]), dinner);
-             }
-            case ExprType::MatMatMul: {
-                    assert(false && "need to implement replicate");
-                   return Expr::add(Expr::matmatmul(args[0]->grad_(dx, args[0]->sh(), dermap), args[1]),
-                           Expr::matmatmul(args[0], args[1]->grad_(dx, args[1]->sh(), dermap)));
-
-               }
-            case ExprType::MatVecMul: {
-                   // TODO!! What is the justification for the "fit shape"??
-                   // (d/dN(M x) = M [dx/dN] + [dM/dy]
-                   return Expr::add(
-                           Expr::replicate(Expr::matvecmul(args[0]->grad_(dx, args[0]->sh(), dermap), args[1]), outsh),
-                           Expr::replicate(Expr::matvecmul(args[0], args[1]->grad_(dx, args[1]->sh(), dermap)), outsh));
-               }
-            case ExprType::Batch: {
-                return Expr::batch(args[0]->grad_(dx, args[0]->sh(), dermap));
-            }
-
-            default:
-                cerr << "\nUnimplemented gradient:\n|" << to_str() << "|\n";
-                assert(false && "unimplemented");
-        }
-    }
-    
-    void force() {
-        switch(ty) {
-            case ExprType::Arr: return;
-            case ExprType::AllOnes: return;
-            case ExprType::Add: {
-                    args[0]->force();
-                    args[1]->force();
-                for(int i = 0; i < args[0]->sh().nelem(); ++i) {
-                    val[i] = args[0]->at(i) + args[1]->at(i);
-                }
-                return;
-            }
-            case ExprType::Sub: {
-                    args[0]->force();
-                    args[1]->force();
-                for(int i = 0; i < args[0]->sh().nelem(); ++i) {
-                    val[i] = args[0]->at(i) - args[1]->at(i);
-                }
-                return;
-            }
-            case ExprType::Dot:
-                    args[0]->force();
-                    args[1]->force();
-                    val[0] = 0;
-                    assert(args[0]->sh().ndim == 1);
-                    assert(args[1]->sh().ndim == 1);
-
-                    for(int i = 0; i < args[0]->sh().nelem(); ++i) {
-                        val[0] += args[0]->at(i) * args[1]->at(i);
-                    }
-                    return;
-            case ExprType::PointwiseMul:
-                    args[0]->force();
-                    args[1]->force();
-                    for(int i = 0; i < args[0]->sh().nelem(); ++i) {
-                            val[i] = args[0]->at(i) * args[1]->at(i);
-                    }
-                    return;
-
-            case ExprType::Tanh: 
-                    args[0]->force();
-                    for(int i = 0; i < args[0]->sh().nelem(); ++i) {
-                        val[i] = tanhf(args[0]->at(i));
-                    }
-                    return;
-
-
-            case ExprType::MatMatMul: {
-                    args[0]->force();
-                    args[1]->force();
-
-                    int M = args[0]->sh()[0];
-                    int N = args[0]->sh()[1];
-                    assert(N == args[1]->sh()[0]);
-                    int O = args[1]->sh()[1];
-
-                    for(int i = 0; i < M; ++i) {
-                        for(int j = 0; j < O; ++j) {
-                            val[i*M+j] = 0;
-                            for(int k = 0; k < N; ++k ) {
-                                val[i*M+j] += args[0]->at(i*N+k) * args[1]->at(k*M+j);
-                            }
-
-                        }
-                    }
-                    return;
-           }
-
-            case ExprType::MatVecMul: {
-                    args[0]->force();
-                    args[1]->force();
-
-                    int M = args[0]->sh()[0];
-                    int N = args[0]->sh()[1];
-                    assert(N == args[1]->sh()[0]);
-
-                    for(int i = 0; i < M; ++i) {
-                        val[i] = 0;
-                        for(int j = 0; j < N; ++j) {
-                                val[j] += args[0]->at(i*N+j) * args[1]->at(j);
-                            }
-
-                    }
-                    return;
-           }
-
-            case ExprType::Index: {
-                args[0]->force();
-                args[1]->force();
-                // args[0] == array.
-                // args[1] == index set
-                for(int i = 0; i < args[1]->sh().nelem(); ++i) {
-                    const int ix = args[1]->val[i];                    
-                    const int stride = args[0]->sh().removeOutermost().nelem();
-                    // array shape: 3 3 [1 0 0; 0 1 0; 0 0 1]
-                    // index set: 1 [1 2]
-                    // out[index[0]] = [1 0 0]
-                    // out[index[1]] = [0 1 0]
-                    // size of out: inner * len(index)
-                    // hopefully GCC optimises this into a memcpy(...)
-                    for(int j = 0; j < stride; ++i) {
-                        val[stride*i + j] = args[0]->val[stride*ix+j];
-                    }
-                }
-                return;
-          }
-
-          default: cerr << to_str(); assert(false && "unhandled"); 
-        }
-    }
-
-    float at(int ix) { 
-        switch(ty) {
-            case ExprType::AllOnes:
-                return 1;
-            case ExprType::AllZeros:
-                return 0;
-            case ExprType::Replicate:
-                // find the value of the index wrt the replication
-                // a[i, j, k] -> a[i]
-                return args[0]->at(ix % args[0]->sh().nelem());
-
-            default:
-                return val[ix];
-        }
-    }
-
-    Shape sh() {
-        switch(ty) {
-            case ExprType::Arr: return val.sh;
-            case ExprType::AllOnes: return virtual_sh;
-            case ExprType::AllZeros: return virtual_sh;
-            case ExprType::Index: return virtual_sh;
-            case ExprType::Unbatch: return virtual_sh;
-            case ExprType::Replicate: return virtual_sh;
-            case ExprType::Tanh: return args[0]->sh();
-            case ExprType::DerTanh: return args[0]->sh();
-            case ExprType::Batch: return args[0]->sh().removeOutermost();
-            case ExprType::Constant: return Shape::zerod(); 
-            case ExprType::Add: 
-                return Shape::unify(args[0]->sh(), args[1]->sh());
-            case ExprType::Sub: 
-                return Shape::unify(args[0]->sh(), args[1]->sh());
-            case ExprType::PointwiseMul:
-                return Shape::unify(args[0]->sh(), args[1]->sh());
-            // TODO: find shape of contraction.
-            case ExprType::MatMatMul:
-                return Shape::twod(args[0]->sh()[0], args[1]->sh()[1]);
-            case ExprType::MatVecMul:
-                return Shape::oned(args[0]->sh()[0]);
-
-            default:
-                assert (false && "unimplemented sh()");
-        }
-    }
-
-
-    string to_str() const {
-        switch(ty) {
-            case ExprType::Arr: return val.name;
-            case ExprType::AllOnes: return "11..1";
-            case ExprType::AllZeros: return "00..0";
-            case ExprType::Add: 
-                return "(+ " + args[0]->to_str() + " " + 
-                        args[1]->to_str() + ")";
-
-            case ExprType::Sub: 
-                return "(- " + args[0]->to_str() + " " + 
-                        args[1]->to_str() + ")";
-
-            case ExprType::Dot: 
-                return "(dot " + args[0]->to_str() + " " + 
-                        args[1]->to_str() + ")";
-
-            case ExprType::Tanh:
-                return "(tanh " + args[0]->to_str() + ")";
-
-            case ExprType::DerTanh:
-                return "(tanh' " + args[0]->to_str() + ")";
-
-            case ExprType::PointwiseMul: 
-                return "(.* " + args[0]->to_str() + " " + 
-                        args[1]->to_str() + ")";
-
-            case ExprType::MatMatMul: 
-                return "(@mm " + args[0]->to_str() + " " + 
-                        args[1]->to_str() + ")";
-
-            case ExprType::MatVecMul: 
-                return "(@mv " + args[0]->to_str() + " " + 
-                        args[1]->to_str() + ")";
-
-            case ExprType::Replicate: 
-                return "(replicate " + virtual_sh.to_str() + " " + 
-                    args[0]->to_str()+ ")";
-
-            case ExprType::Index: 
-                return "(!! " + args[0]->to_str() + " " +
-                            args[1]->to_str() + ")";
-            case ExprType::Batch:
-                return "(batch " + args[0]->to_str() + ")";
-            case ExprType::Unbatch:
-                return "(unbatch " + to_string(virtual_sh[0]) + " " + 
-                    args[0]->to_str() + ")";
-            case ExprType::Constant:
-                return "(constant " + to_string(constval) + ")";
-            case ExprType::Let:
-                return "(let " + val.name + " := " + args[0]->to_str() +  
-                    " in " + args[1]->to_str() + ")";
-            default:
-                assert(false && "unimplemented to_str()");
-
-        }
-    }
-    
 };
 
-enum class StmtType {
-    Assign,
-    AddAssign,
+struct ConstantInt : public Expr {
+    int i;
+    ConstantInt(int i) : Expr(ExprType::ConstantInt), i(i) {};
+
+    string to_str() const { return std::to_string(i); }
+    set<Index> free() const { return {}; }
+    Expr *grad(string name, vector<Index> ixs) { 
+        return new ConstantInt(0);
+    }
+
+    Expr *subst(Index old, Index new_) const {
+        return new ConstantInt(i);
+    }
+
+};
+
+struct Delta : public Expr {
+    Index old;
+    Index new_;
+
+    Delta(Index old, Index new_) : Expr(ExprType::Delta), 
+    old(old), new_(new_) { };
+
+    string to_str() const {
+        string s = "(δ ";
+        s +=  old.to_str() + "->" + new_.to_str();
+        s += ")";
+        return s;
+    }
+
+    virtual set<Index> free() const {
+        set<Index> s;
+        s.insert(old);
+        s.insert(new_);
+        return s;
+    }
+
+    Expr *grad(string arr, vector<Index> ixs) {
+        return new ConstantInt(0);
+    };
+
+    Expr *subst(Index sold, Index snew) const {
+        // (i->k) delta_ij : delta_kj
+        // (i->k) delta_ji : delta_jk
+        // (i->k) delta_ii : delta_kk
+        // (i->k) delta_jl : delta_jl
+        return new Delta(old == sold ? snew : old,
+                    new_ == sold ? snew : new_);
+    }
+};
+
+
+struct Arr : public Expr {
+    string name;
+    Arr(string name) : Expr(ExprType::Arr), name(name) {};
+    string to_str() const { return name; };
+
+    set<Index> free() const {
+        return set<Index>();
+    }
+
+    Expr *grad(string arr, vector<Index> ixs) {
+        // if we ever get here, then we should be 0-dimensional
+        assert(ixs.size() == 0);
+        if (arr == name) return new ConstantInt(1);
+        return new ConstantInt(0);
+    };
+
+    Expr *subst(Index old, Index new_) const {
+        // if we ever get here, then we should be 0-dimensional
+        return new Arr(name);
+    }
+
+
+};
+
+
+struct Add : public Expr {
+    vector<Expr*>inner;
+
+    Add(vector<Expr *> inner) : 
+        Expr(ExprType::Add), inner(inner) {};
+
+    Add (Expr *l, Expr *r) : Expr(ExprType::Add) {
+        inner.push_back(l);
+        inner.push_back(r);
+
+    }
+
+    string to_str() const {
+        string s = "(+ ";
+
+        for(int i = 0; i < (int)inner.size(); ++i) {
+            s += inner[i]->to_str() + 
+                (i < (int)inner.size() - 1 ? " " : "");
+        }
+        s += ")";
+        return s;
+    }
+
+    set<Index> free() const {
+        set<Index> f;
+
+        for(Expr *i: inner) {
+            set<Index> ifree = i->free();
+            f.insert(ifree.begin(), ifree.end());
+        }
+        return f;
+    }
+
+    Expr *grad(string name, vector<Index> ixs) {
+        vector<Expr *>dinner;
+        for(Expr *e : inner) {
+            dinner.push_back(e->grad(name, ixs));
+        }
+        return new Add(dinner);
+    }
+
+    Expr *subst(Index old, Index new_) const {
+        vector<Expr *> sinner;
+        for(Expr *e : inner) {
+            sinner.push_back(e->subst(old, new_));
+        }
+        return new Add(sinner);
+    }
+};
+
+struct Mul : public Expr {
+    vector<Expr *>inner;
+   
+    Mul (Expr *l, Expr *r) : Expr(ExprType::Mul) {
+        inner.push_back(l);
+        inner.push_back(r);
+    }
+
+    Mul(vector<Expr *> inner) : Expr(ExprType::Mul), inner(inner) {};
+
+    string to_str() const {
+        string s =  "(* ";
+        for(int i = 0; i < (int)inner.size(); ++i) {
+            s += inner[i]->to_str();
+            s += (i < (int)inner.size() - 1 ? " " : "");
+        }
+        return s;
+    }
+
+    set<Index> free() const {
+        set<Index> f;
+
+        for(Expr *i: inner) {
+            set<Index> ifree = i->free();
+            f.insert(ifree.begin(), ifree.end());
+        }
+        return f;
+    }
+
+    Expr *grad(string name, vector<Index> ixs) {
+
+        // d(fgh) = df gh + f dg h + fg dh
+        vector<Expr *> dsum;
+
+        for(int i = 0; i < (int)inner.size(); ++i) {
+            vector<Expr *> dinner_i = inner;
+            dinner_i[i] = dinner_i[i]->grad(name, ixs);
+
+            dsum.push_back(new Mul(dinner_i));
+        }
+
+        return new Add(dsum);
+    }
+
+    Expr *subst(Index old, Index new_) const {
+        vector<Expr *> sinner;
+        for(Expr *e : inner) {
+            sinner.push_back(e->subst(old, new_));
+        }
+        return new Mul(sinner);
+    }
+};
+
+struct Slice : public Expr {
+    Expr *inner;
+    vector<Index> ixs;
+
+    Slice(Expr *inner, vector<Index> ixs): 
+        Expr(ExprType::Slice), inner(inner), ixs(ixs) {}; 
+
+    string to_str() const  {
+        string s =  "(! " + inner->to_str() + " ";
+
+        for(int i = 0; i < (int)ixs.size(); ++i) {
+            s += ixs[i].to_str() + (i < (int)ixs.size() - 1 ? " " : "");
+        }
+
+        s += ")";
+        return s;
+    }
+
+    set<Index> free() const {
+        set<Index> s = inner->free();
+        for (Index ix :ixs) { s.insert(ix); };
+        return s;
+    }
+
+    Expr *grad(string name, vector<Index> gixs) {
+        // we are a slice of an expression, allow the inner part
+        // to continue uninhibited
+        Arr *a = dynamic_cast<Arr *>(inner);
+        if (!a) { return new Slice(inner->grad(name, gixs), ixs); }
+
+        // this IS the slice of an array, but not the array we are
+        // looking for. Return zero
+        if(name != a->name) { return new ConstantInt(0); }
+
+        // we ARE the slce of the array we were looking for.
+        assert(name == a->name);
+
+        assert(gixs.size() >= 1);
+        assert(gixs.size() == ixs.size());
+
+        // create deltas, one for each index of the array.
+        Expr *cur = new Delta(ixs[0], gixs[0]);
+        for(int i = 1; i < (int)ixs.size(); ++i) {
+            cur = new Mul(cur, new Delta(ixs[i], gixs[i]));
+        }
+        return cur;
+    }
+
+    // substitute old indeces for new indeces.
+    virtual Expr *subst(Index old, Index new_) const {
+        vector<Index> ixsnew;
+        for(int i = 0; i < (int)ixs.size(); ++i) {
+            ixsnew.push_back(ixs[i] == old ? new_ : ixs[i]);
+        }
+        return new Slice(inner, ixsnew);
+    }
+
+};
+
+
+Expr *Expr::ix(vector<Index> ixs) {
+    return new Slice(this, ixs);
+}
+
+Expr *Expr::ix(Index ix1) {
+    return new Slice(this, {ix1});
+}
+
+Expr *Expr::ix(Index ix1, Index ix2) {
+    return new Slice(this, {ix1, ix2});
+}
+
+
+struct Contract : public Expr {
+    Index ix;
+    Expr *inner;
+    Contract (Index ix, Expr *inner) : Expr(ExprType::Contract), ix(ix),
+        inner(inner) {};
+
+    string to_str() const {
+        return "(>< " + ix.to_str() + " " + inner->to_str() +  ")";
+    }
+
+    set<Index> free() const {
+        set<Index> infree = inner->free();
+        auto it = infree.find(ix);
+        if (it != infree.end()) infree.erase(it);
+        return infree;
+    }
+
+    Expr *grad(string name, vector<Index> ixs) {
+        return new Contract(ix, inner->grad(name, ixs));
+    }
+
+    Expr *subst(Index old, Index new_) const {
+        return new Contract(ix == old ? new_ : ix, inner);
+    }
+
+};
+
+
+Expr *Expr::contract(Index ix) {
+    return new Contract(ix, this);
+}
+
+struct ExprVisitor {
+    Expr *visitExpr(Expr *e) {
+        if (Add *a = dynamic_cast<Add *>(e)) {
+            return visitAdd(a);
+        }
+        else if (Mul *m = dynamic_cast<Mul *>(e)) {
+            return visitMul(m);
+        }
+        else if (Contract *c = dynamic_cast<Contract *>(e)) {
+            return visitContract(c);
+        } 
+        else {
+            return e;
+        }
+
+        // assert(false && "unknown expr type!");
+
+    };
+
+    virtual Expr *visitMul(Mul *m) { 
+        vector<Expr *> inner;
+        for(Expr *e : m->inner) {
+            inner.push_back(visitExpr(e));
+        }
+        return new Mul(inner);
+    }
+
+    virtual Expr *visitAdd(Add *a) { 
+        vector<Expr *> inner;
+        for(Expr *e : a->inner) {
+            inner.push_back(visitExpr(e));
+        }
+        return new Add(inner);
+    };
+    virtual Expr *visitContract(Contract *c) { 
+        Expr *inner = visitExpr(c->inner);
+        return new Contract(c->ix, inner);
+    }
 };
 
 struct Stmt {
-    Arr lhs;
+    string lhs;
     Expr *rhs;
-    StmtType ty;
+};
 
-    Stmt assign(Arr lhs, Expr *rhs) const {
-        Stmt s;
-        s.lhs = lhs;
-        s.rhs = rhs;
-        s.ty = StmtType::Assign;
-        return s;
-    }
 
-    Stmt addassign(Arr lhs, Expr *rhs) const {
-        Stmt s;
-        s.lhs = lhs;
-        s.rhs = rhs;
-        s.ty = StmtType::AddAssign;
-        return s;
+// (>< (+ a b c)) = (+ (>< a) (>< b) (>< c))
+struct PushContractionInwardsVisitor : ExprVisitor {
+    virtual Expr* visitContract(Contract *c) {
+        Add *a = dynamic_cast<Add *>(c->inner);
+        if (!a) return c;
+
+        vector<Expr *> inner;
+        for(Expr *e : a->inner) {
+            inner.push_back(new Contract(c->ix, visitExpr(e)));
+        }
+        return new Add(inner);
     }
 };
 
-using StmtList = vector<Stmt>;
 
-
-bool isexprconstant(const Expr *e) {
-    switch(e->ty) {
-        case ExprType::AllOnes:
-        case ExprType::AllZeros:
-            return true;
-        default: return false;
-    }
+bool is_const_zero(const Expr *e) {
+    const ConstantInt *i = dynamic_cast<const ConstantInt*>(e);
+    if (!i) return false;
+    return i->i == 0;
 }
 
-void getSubexpressions(Expr *e, map<Expr, int> &s) {
-
-    switch(e->ty) {
-        case ExprType::Arr: return;
-        case ExprType::Add:
-        case ExprType::Sub:
-        case ExprType::PointwiseMul:
-        case ExprType::Dot:
-        case ExprType::MatMatMul:
-        case ExprType::MatVecMul:
-            s[*e] += 1;
-            getSubexpressions(e->args[0], s);
-            getSubexpressions(e->args[1], s);
-            return;
-
-        case ExprType::Tanh:
-        case ExprType::DerTanh:
-            s[*e] += 1;
-            getSubexpressions(e->args[0], s);
-            return;
-
-        default:
-            cerr << "unknown expr:\n|" << e->to_str() << "|\n";
-            assert(false && "unknown expr for getSubexpressions");
-    }
-    
+bool is_const_one(const Expr *e) {
+    const ConstantInt *i = dynamic_cast<const ConstantInt*>(e);
+    if (!i) return false;
+    return i->i == 1;
 }
 
-Expr *commonSubexpressionElimination(Expr *e) {
-    map<Expr, int> s;
-    getSubexpressions(e, s);
 
-    cout << "subexpressions:\n";
-    for(auto it : s) {
-        cout << "**--- " << it.second << ":" << it.first.to_str() << "\n";
+bool is_all_const_zero(const vector<Expr *> &elist) {
+    for(const Expr *e : elist) {
+        if (!is_const_zero(e)) return false;
     }
-    exit(0);
+    return true;
+}
 
+
+bool is_any_const_zero(const vector<Expr *> &elist) {
+    for(const Expr *e : elist) {
+        if (is_const_zero(e)) return true;
+    }
+    return false;
+}
+
+struct ConstantFoldVisitor : ExprVisitor {
+    virtual Expr *visitMul(Mul *m) {
+
+        // constant fold multiplication with 0, remove multiplication
+        // with 1.
+        if (is_any_const_zero(m->inner)) { return new ConstantInt(0); }
+
+        vector<Expr *> inner;
+        for(Expr *e : m->inner) {
+            if(is_const_one(e)) continue;
+            inner.push_back(visitExpr(e));
+        }
+
+        if (inner.size() == 1) { return inner[0]; }
+
+        return new Mul(inner);
+    }
+
+    virtual Expr *visitAdd(Add *a) {
+        vector<Expr *> inner;
+        for(Expr *e : a->inner) {
+            if (is_const_zero(e)) continue;
+            inner.push_back(visitExpr(e));
+        }
+
+        if (inner.size() == 1) return inner[0];
+        return new Add(inner);
+    }
+
+    virtual Expr *visitContract(Contract *c) {
+        if (is_const_zero(c->inner)) return new ConstantInt(0);
+        return ExprVisitor::visitContract(c);
+    }
+};
+
+// return a Delta that is within es, which replaces the
+// the index ix. return -1 otherwise.
+int findDeltaForIndex(Index ix, vector<Expr *> es) {
+    for(int i = 0; i < (int)es.size(); ++i) {
+        Delta *d = dynamic_cast<Delta *>(es[i]);
+        if(d && d->old == ix) return i;
+    }
+    return -1;
+}
+
+// eliminate (>< i (* t1 t2 (δ i->j) t3)) with 
+//     (* t1[i->j] t2[i->j] t3[i->j])
+struct EliminateContractionVisitor : public ExprVisitor {
+    virtual Expr *visitContract(Contract *c) {
+        Mul *m = dynamic_cast<Mul *>(c->inner);
+        if (!m) { 
+            return new Contract(c->ix, ExprVisitor::visitExpr(c->inner));
+        };
+
+        vector<Expr *> subst;
+        const int deltaix = findDeltaForIndex(c->ix, m->inner);
+        if (deltaix == -1) { 
+            return new Contract(c->ix, ExprVisitor::visitExpr(c->inner));
+        }
+
+        const Delta *d = dynamic_cast<Delta *>(m->inner[deltaix]);
+        assert(d && "output from findDeltaForIndex should be Delta");
+
+        // success
+        vector<Expr *> substInner;
+        for(Expr *e : m->inner) {
+            if (e == d) continue;
+            substInner.push_back(ExprVisitor::visitExpr(e->subst(c->ix,
+                            d->new_)));
+        }
+        return new Mul(substInner);
+    };
+};
+
+
+Expr *pushContractionsInwards(Expr *e) {
+    if (Add *a = dynamic_cast<Add *>(e)) {
+        vector<Expr *> inner;
+        for(Expr *e : a->inner) inner.push_back(pushContractionsInwards(e));
+        return new Add(inner);
+    }
+    if (Mul *m = dynamic_cast<Mul *>(e)) {
+        vector<Expr *> inner;
+        for(Expr *e : m->inner) inner.push_back(pushContractionsInwards(e));
+        return new Mul(inner);
+    }
+    // (>< (+ a b c)) = (+ (>< a) (>< b) (>< c))
+    else if (Contract *c = dynamic_cast<Contract *>(e)) {
+        Add *a = dynamic_cast<Add *>(c->inner);
+        vector<Expr *> inner;
+        for(Expr *e : a->inner) {
+            inner.push_back(new Contract(c->ix, pushContractionsInwards(e)));
+        }
+        return new Add(inner);
+
+    }
     return e;
 }
 
-// move all constants to the left. If both params are constants, then fold
-Expr *constantfold(Expr *e) {
-    switch(e->ty) {
-        case ExprType::PointwiseMul:
-            if (e->args[0]->ty == ExprType::AllZeros || 
-                    e->args[1]->ty == ExprType::AllZeros) {
-                return Expr::allzeros(e->sh());
-            }
-            if (e->args[0]->ty == ExprType::AllOnes) {
-                return constantfold(e->args[1]);
-            }
-            if (e->args[1]->ty == ExprType::AllOnes) {
-                return constantfold(e->args[0]);
-            }
-            return Expr::pointwisemul(constantfold(e->args[0]), constantfold(e->args[1]));
-
-        case ExprType::MatVecMul:
-            if (e->args[0]->ty == ExprType::AllZeros || 
-                    e->args[1]->ty == ExprType::AllZeros) {
-                return Expr::allzeros(e->sh());
-            }
-            if (e->args[0]->ty == ExprType::AllOnes) {
-                return constantfold(e->args[1]);
-            }
-            if (e->args[1]->ty == ExprType::AllOnes) {
-                return constantfold(e->args[0]);
-            }
-            return Expr::matvecmul(constantfold(e->args[0]), constantfold(e->args[1]));
-
-
-
-        case ExprType::Add:
-            if(e->args[0]->ty == ExprType::AllZeros && 
-                    e->args[1]->ty == ExprType::AllOnes) {
-                return Expr::allones(e->sh());
-            }
-            if(e->args[0]->ty == ExprType::AllZeros) {
-                return constantfold(e->args[1]);
-            }
-            if(e->args[1]->ty == ExprType::AllZeros) {
-                return constantfold(e->args[0]);
-            }
-            return Expr::add(constantfold(e->args[0]), constantfold(e->args[1]));
-
-        case ExprType::Sub:
-            if(e->args[1]->ty == ExprType::AllZeros) {
-                return constantfold(e->args[0]);
-            }
-            return Expr::sub(constantfold(e->args[0]), constantfold(e->args[1]));
-
-        case ExprType::Replicate:
-            if (e->args[0]->sh() == e->virtual_sh) {
-                return constantfold(e->args[0]);
-            } 
-            else if (e->args[0]->ty == ExprType::AllOnes) {
-                return Expr::allones(e->virtual_sh);
-            }
-            else if (e->args[0]->ty == ExprType::AllZeros) {
-                return Expr::allzeros(e->virtual_sh);
-            }
+// convert (+ (+ a b) (+ c d)) to (+ a b c d) and similary
+// for multiplication
+struct FlattenVisitor : public ExprVisitor {
+    virtual Expr *visitMul(Mul *m) {
+        vector<Expr *> inner;
+        for(Expr *e : m->inner) {
+            Mul *me = dynamic_cast<Mul *>(e);
+            if (!me) { inner.push_back(e); }
             else {
-                return Expr::replicate(constantfold(e->args[0]), e->virtual_sh);
+                // copy everything from the inner multiplication
+                inner.insert(inner.end(), me->inner.begin(), me->inner.end());
             }
+        }
+        return new Mul(inner);
+    }
 
-        case ExprType::Batch:
-            if (e->args[0]->ty == ExprType::AllZeros) {
-                return Expr::allzeros(e->sh());
+    virtual Expr *visitAdd(Add *a) {
+        vector<Expr *> inner;
+        for(Expr *e : a->inner) {
+            Add *ae = dynamic_cast<Add *>(e);
+            if (!ae) { inner.push_back(e); }
+            else {
+                // copy everything from the inner multiplication
+                inner.insert(inner.end(), ae->inner.begin(), ae->inner.end());
             }
-            else if (e->args[0]->ty == ExprType::AllOnes) {
-                return Expr::allones(e->sh());
-            }
-            return Expr::batch(constantfold(e->args[0]));
-
-        default: return e;
+        }
+        return new Add(inner);
     }
+};
+
+
+// move dirac deltas leftwards
+/*
+Expr *reassocDelta(Expr *e) {
+    if (Add *a = dynamic_cast<Add *>(e)) {
+        return new Add(reassocDelta(a->l), reassocDelta(a->r));
+    } else if (Mul *m = dynamic_cast<Mul *>(e)) {
+        if (Delta *dr = dynamic_cast<Delta *>(m->r)) {
+            return new Mul(dr, reassocDelta(m->l));
+        } else {
+            return new Mul(reassocDelta(m->l), reassocDelta(m->r));
+        }
+    } else if (Contract *c = dynamic_cast<Contract *>(e)) {
+        return new Contract(c->ix, reassocDelta(c->inner));
+    }
+    return e;
 }
 
-void test_expr_let_bindings() {
-    {
-        cout << "Let bindings\n\n";
-
-        const int N = 3;
-        Arr arra = Arr(N, "a");
-        Arr asq = Arr(N, "asq");
-
-        Expr *afour = Expr::add(Expr::arr(arra), Expr::add(Expr::arr(asq), Expr::arr(asq)));
-        afour = Expr::let(asq, Expr::add(Expr::arr(arra), Expr::arr(arra)), afour);
-        cout << "a^4: " << afour->to_str() << "\n\n";
-        cout << "a^4->grad[a]: " << afour->grad(arra)->to_str() << "\n\n";
+// eliminate (>< i (* (δ i->j) t1)) with t1[i/j]
+Expr *eliminateContractions(Expr *e)  {
+    if (Add *a = dynamic_cast<Add *>(e)) {
+        return new Add(eliminateContractions(a->l), eliminateContractions(a->r));
     }
+    else if (Mul *m = dynamic_cast<Mul *>(e)) {
+        return new Mul(eliminateContractions(m->l), eliminateContractions(m->r));
+    } else if (Contract *c = dynamic_cast<Contract *>(e)) {
+        if (!c) return e;
+        Mul *m = dynamic_cast<Mul *>(c->inner);
+        if (!m) return e;
+        Delta *d = dynamic_cast<Delta *>(m->l);
+        if (!d) return e;
+
+        if (c->ix == d->old) {
+            return m->r->subst(d->old, d->new_);
+        }
+    }
+
+    return e;
+};
+*/
+
+
+/*
+Expr *constantFold(Expr *e) {
+    if (Mul *m = dynamic_cast<Mul*>(e)) {
+        if (is_const_zero(m->l)) return new ConstantInt(0);
+        if (is_const_zero(m->r)) return new ConstantInt(0);
+        if (is_const_one(m->r)) return m->l;
+        if (is_const_one(m->l)) return m->r;
+    }
+
+    if (Add *a = dynamic_cast<Add*>(e)) {
+        if (is_const_zero(a->l)) return a->r;
+        if (is_const_zero(a->r)) return a->l;
+
+        return new Add(constantFold(a->l), constantFold(a->r));
+    }
+
+    if (Contract *c = dynamic_cast<Contract*>(e)) {
+        // contracting over zero is just 0
+        if (is_const_zero(c->inner)) { return new ConstantInt(0); }
+        return new Contract(c->ix, constantFold(c->inner));
+    }
+
+    return e;
 }
+*/
 
-void test_expr_dot() {
-    {
-    const int N = 3;
-    Arr arra = Arr(N, "a");
-    Arr arrb = Arr(N, "b");
-    for(int i = 0; i < N; ++i) arra[i] = i;
-    for(int i = 0; i < N; ++i) arrb[i] = i*2;
-    Expr *a = Expr::arr(arra);
-    Expr *b = Expr::arr(arrb);
-
-    Expr *add = Expr::add(a, b);
-    Expr *dot = Expr::dot(a, b);
-    cout << dot->to_str();
-
-    // force this thunk.
-    dot->force();
-
-    cout << "arra:\n"; arra.print_data();
-    cout << "\narrb:"; arrb.print_data();
-    cout << "\nadd:"; add->val.print_data();
-
-    cout << "\ndot: "; cout << dot->to_str();
-    cout << "\ndot: "; dot->val.print_data();
-
-    Expr *dotder = dot->grad(arrb);
-    cout << "grad of dot wrt b:";
-    cout << ": " << dotder->to_str();
-
-    for(int i = 0; i < 3; ++i) {
-        dotder = constantfold(dotder);
+Expr *simplify(Expr *e) {
+    PushContractionInwardsVisitor pushv;
+    ConstantFoldVisitor cfv;
+    EliminateContractionVisitor ecv;
+    FlattenVisitor fv;
+    for(int i = 0; i < 5; ++i) {
+        cout << "--\n";
+        cout << i << "|"  << e->to_str() << "\n";
+        e = pushv.visitExpr(e);
+        // e = pushContractionsInwards(e);
+        cout << i << "|PUSH|" << e->to_str() << "\n";
+        e = cfv.visitExpr(e);
+        cout << i << "|FOLD|" << e->to_str() << "\n";
+        e = ecv.visitExpr(e);
+        cout << i << "|ELIM|" << e->to_str() << "\n";
+        e = fv.visitExpr(e);
+        cout << i << "|FLAT|" << e->to_str() << "\n";
+        // e = reassocDelta(e);
+        // cout << i << "|REASSOC|" << e->to_str() << "\n";
     }
-
-    cout << " | simpl " << dotder->to_str();
-    }
-}
-
-void test_expr_rnn() {
-    {
-        cout << "\n\n\nRNN Computation\n\n\n";
-        // joint modelling of words and corpus
-        static const int windowsize = 3;
-        static const int embedsize = 4;
-        static const int hiddensize = 10;
-        vector<int> sentence;
-        vector<Arr> embeds;
-        Expr *inputs[windowsize];
-        Expr *hiddens[windowsize+1];
-
-        Arr H2H = Arr(hiddensize, hiddensize, "H2H");
-        Arr I2H = Arr(hiddensize, embedsize, "I2H");
-        Arr H2HBias = Arr(hiddensize, "H2HBias");
-
-        Arr H2O = Arr(embedsize, hiddensize, "H2O");
-        Arr H2OBias = Arr(embedsize, "H2OBias");
-
-        for(int i = 0; i < (int)vocab.size(); ++i) {
-            embeds[i] = Arr(embedsize, ix2word[i]);
-        }
-
-        for(int i = 0; i < windowsize; ++i) {
-            inputs[i] = Expr::arr(Arr(embedsize, "i" + std::to_string(i)));
-        }
-
-        hiddens[0] = Expr::arr(Arr(hiddensize, "hinit"));
-        for(int i = 1; i <= windowsize; ++i) {
-            hiddens[i] = Expr::tanh(Expr::add(Expr::matvecmul(Expr::arr(I2H), inputs[i-1]),
-                        Expr::matvecmul(Expr::arr(H2H), hiddens[i-1])));
-        }
-
-        Expr *out = Expr::tanh(Expr::add(Expr::matvecmul(Expr::arr(H2O), hiddens[windowsize]), Expr::arr(H2OBias)));
-        cout << "out: " << out->to_str() << "\n";
-
-        Expr *H2Hgrad = out->grad(H2H);
-        for(int i = 0; i < 6; ++i) {
-            cout << "\n" << i << "| out->grad[H2H]:" << H2Hgrad->to_str();
-                H2Hgrad = constantfold(H2Hgrad);
-        }
-
-        commonSubexpressionElimination(H2Hgrad);
-
-        Expr *H2OGrad = out->grad(H2O);
-        for(int i = 0; i < 6; ++i) {
-            cout << "\n" << i << "| out->grad[H2O]:" << H2OGrad->to_str();
-                H2OGrad = constantfold(H2OGrad);
-        }
-
-    }
-}
-
-void test_expr_rnn_batched() {
-
-    
-    {
-        cout << "\n\n\nRNN Computation with batching\n\n\n";
-        // joint modelling of words and corpus
-        static const int batchsize = 2;
-        static const int windowsize = 1;
-        static const int embedsize = 4;
-        static const int hiddensize = 10;
-        vector<int> sentence;
-        vector<Arr> embeds;
-
-        
-        Arr H2H = Arr(hiddensize, hiddensize, "H2H");
-        Arr I2H = Arr(hiddensize, embedsize, "I2H");
-        Arr H2HBias = Arr(hiddensize, "H2HBias");
-
-        Arr H2O = Arr(embedsize, hiddensize, "H2O");
-        Arr H2OBias = Arr(embedsize, "H2OBias");
-
-        for(int i = 0; i < (int)vocab.size(); ++i) {
-            embeds[i] = Arr(embedsize, ix2word[i]);
-        }
-
-        // inputs: batchsize x embedsize
-        Expr *inputs[windowsize];
-        for(int i = 0; i < windowsize; ++i) {
-            inputs[i] = Expr::arr(Arr(batchsize, embedsize, "i_batched" + std::to_string(i)));
-        }
-
-        // outputs array, batchsize x embedsize
-        Arr outputs = Arr(batchsize, embedsize, "output_batched");
-
-        Expr *hiddens[windowsize+1];
-
-        // create the compute kernel
-        hiddens[0] = Expr::arr(Arr(hiddensize, "hinit"));
-        for(int i = 1; i <= windowsize; ++i) {
-            hiddens[i] = Expr::tanh(Expr::add(Expr::matvecmul(Expr::arr(I2H), Expr::batch(inputs[i-1])),
-                        Expr::matvecmul(Expr::arr(H2H), hiddens[i-1])));
-        }
-
-        // should be batchsize x embedsize, but our kernel pretends it is embedsize
-        Expr *predict = Expr::tanh(Expr::add(Expr::matvecmul(Expr::arr(H2O), hiddens[windowsize]), Expr::arr(H2OBias)));
-
-        cout << "RNN prediction:\n" << predict->to_str();
-
-        // full loss
-        Expr *loss = Expr::sub(Expr::batch(Expr::arr(outputs)), predict);
-        cout << "\n\nRRN loss:\n" << loss->to_str();
-
-        // find derivative of loss wrt H2H, H2O, I2H, H2OBias
-        Expr *H2Hgrad = loss->grad(H2H);
-        for(int i = 0; i < 6; ++i) {
-            cout << "\n" << i << "| out->grad[H2H]:" << H2Hgrad->to_str();
-                H2Hgrad = constantfold(H2Hgrad);
-        }
-        cout << "\n\n";
-
-        
-        Expr *H2Ograd = loss->grad(H2O);
-        cout << "\n\nloss->grad[H2O]: " << H2Ograd->to_str();
-        
-        Expr *I2Hgrad = loss->grad(I2H);
-        cout << "\n\nloss->grad[I2H]: " << I2Hgrad->to_str();
-        
-        Expr *H2OBiasgrad = loss->grad(H2OBias);
-        cout << "\n\nloss->grad[H2OBias]: " << H2OBiasgrad->to_str();
-        
-        
-        // scaled gradient
-        const float learningrate = 1e-2;
-        Expr *H2hgradscaled = Expr::pointwisemul(Expr::constant(learningrate), H2Hgrad);
-        cout << "\n\nlearningrate * loss->grad[H2H]:\n" << H2hgradscaled->to_str();
-
-
-    }   
-
+    return e;
 }
 
 void add_word_to_vocab(string w) {
@@ -1155,6 +883,7 @@ bool consume_till_sentence_end_or_word(FILE *f) {
     }
 }
 
+
 vector<int> parse_sentence(FILE *f) {
     vector<int> sentence;
     while(1) {
@@ -1166,6 +895,54 @@ vector<int> parse_sentence(FILE *f) {
         assert(it != word2ix.end());
         sentence.push_back(it->second);
     }
+}
+
+
+void test_expr_dot() {
+    Expr *a = new Arr("a");
+    Expr *b = new Arr("b");
+    Index i("i");
+    Expr *mul = new Mul(a->ix(i), b->ix(i));
+    Expr *dot = new Contract(i, mul);
+
+    cout << "***dot***\n";
+    cout << dot->detailed_to_str() << "\n";
+    Index k("k");
+    Expr *grad = dot->grad("a", {k});
+    cout << "## dot->grad[a k]: ##\n\t" << grad->detailed_to_str() << "\n";
+    simplify(grad);
+}
+
+// contract over all free indeces
+Expr* contractOverFree(Expr *e) {
+    set<Index> free = e->free();
+    for(Index ix : free) {
+        e = new Contract(ix, e);
+    }
+    return e;
+}
+
+void test_expr_matvec() {
+    Expr *a = new Arr("a");
+    Expr *b = new Arr("b");
+    Index i("i"), j("j");
+    Expr *mul = new Mul(a->ix(i, j), b->ix(j));
+    Expr *matvec = new Contract(j, mul);
+
+    cout << "***mul***\n";
+    cout << matvec->detailed_to_str() << "\n";
+
+
+    // before we can take the gradient, we need to put a sum over all
+    // free parameters
+    Expr *grada = contractOverFree(matvec)->grad("a", 
+            {Index("k"), Index("l")});
+    cout << "## mul->grad[a k l]: ##\n\t" << grada->to_str() << "\n";
+    simplify(grada);
+
+    Expr *gradb = contractOverFree(matvec)->grad("b", {Index("k")});
+    cout << "## mul->grad[b k]: ##\n\t" << gradb->to_str() << "\n";
+    simplify(gradb);
 }
 
 
@@ -1205,6 +982,7 @@ int main(int argc, char **argv) {
 
     // use_expr();
     test_expr_dot();
-    test_expr_rnn_batched();
-    
+    test_expr_matvec();
+    // test_expr_tanh_matvec();
+    // test_expr_rnn_batched();
 }
