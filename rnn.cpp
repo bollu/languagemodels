@@ -139,53 +139,6 @@ struct Shape {
     }
 };
 
-// only 1D frrays
-/*
-struct Arr {
-    Shape sh;
-    float *data = nullptr;
-    std::string name = "undef";
-
-    Arr() = default;
-    Arr(const Arr &other) = default;
-    Arr (Shape sh, string name) : 
-        sh(sh), data(new float[sh.nelem()]), name(name) {
-        };
-
-    Arr (int n, string name) : 
-        sh(Shape::oned(n)), data(new float[n]), name(name) {};
-    Arr (int n, int m, string name) :
-        sh(Shape::twod(n, m)), data(new float[n*m]), name(name) {};
-
-    float &operator [](int ix) {
-        assert(ix < sh.nelem());
-        assert(ix >= 0);
-        return data[ix];
-    }
-    
-    void print_data() {
-        cout <<name <<  "[";
-        for(int i = 0; i < sh.nelem(); ++i) {
-            cout << data[i] << (i < sh.nelem() - 1 ? " " : "");
-        }
-        cout << "]\n";
-    }
-
-    bool operator < (const Arr &other) const {
-        // lex compare, first on name, then on shape
-        return name < other.name || 
-            ((name == other.name) && (sh < other.sh));
-    }
-
-    bool operator == (const Arr &other) const {
-        return name == other.name && (sh == other.sh);
-    }
-
-    bool operator != (const Arr &other) const {
-        return !(*this == other);
-    }
-};
-*/
 
 enum class ExprType {
     Add,
@@ -195,7 +148,8 @@ enum class ExprType {
     Slice,
     Contract,
     Delta,
-    ConstantInt
+    ConstantInt,
+    Tanh,
 };
 
 struct Index {
@@ -371,6 +325,7 @@ struct Add : public Expr {
     }
 };
 
+
 struct Mul : public Expr {
     vector<Expr *>inner;
    
@@ -423,6 +378,14 @@ struct Mul : public Expr {
         return new Mul(sinner);
     }
 };
+
+Expr *exprNegate(Expr *e) {
+    return new Mul(new ConstantInt(-1), e);
+};
+
+Expr *exprsub(Expr *l, Expr *r) {
+    return new Add(l, exprNegate(r));
+}
 
 struct Slice : public Expr {
     Expr *inner;
@@ -528,6 +491,34 @@ struct Contract : public Expr {
 Expr *Expr::contract(Index ix) {
     return new Contract(ix, this);
 }
+
+struct Tanh : public Expr {
+    Expr *inner;
+    Tanh(Expr *inner) : Expr(ExprType::Tanh), inner(inner) {};
+
+    string to_str() const {
+        return "(tanh " + inner->to_str() + ")";
+    }
+
+    set<Index> free() const {
+        return inner->free();
+    }
+
+
+    Expr *subst(Index old, Index new_) const { 
+        return new Tanh(inner->subst(old, new_));
+    }
+
+    Expr *grad(string name, vector<Index> ixs) {
+        Expr *dtan = exprsub(new ConstantInt(1), new Mul(new Tanh(inner), new
+                    Tanh(inner)));
+        Expr *dinner = inner->grad(name, ixs);
+        return new Mul(dtan, dinner);
+    }
+
+
+
+};
 
 struct ExprVisitor {
     Expr *visitExpr(Expr *e) {
@@ -945,6 +936,29 @@ void test_expr_matvec() {
     simplify(gradb);
 }
 
+void test_expr_tanh() {
+    Expr *a = new Arr("a");
+    Index i("i"), j("j");
+    Expr *aixed = a->ix(i, j);
+    Expr *matvec = new Tanh(aixed);
+
+    cout << "***tanh on matrix***\n";
+    cout << matvec->detailed_to_str() << "\n";
+
+
+    // before we can take the gradient, we need to put a sum over all
+    // free parameters
+    Expr *grada = contractOverFree(matvec)->grad("a", 
+            {Index("k"), Index("l")});
+    cout << "## mul->grad[a k l]: ##\n\t" << grada->to_str() << "\n";
+    simplify(grada);
+
+    // Expr *gradb = contractOverFree(matvec)->grad("b", {Index("k")});
+    // cout << "## mul->grad[b k]: ##\n\t" << gradb->to_str() << "\n";
+    // simplify(gradb);
+
+}
+
 
 int main(int argc, char **argv) {
     if (argc != 2) {
@@ -983,6 +997,6 @@ int main(int argc, char **argv) {
     // use_expr();
     test_expr_dot();
     test_expr_matvec();
-    // test_expr_tanh_matvec();
+    test_expr_tanh();
     // test_expr_rnn_batched();
 }
