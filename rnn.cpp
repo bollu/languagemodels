@@ -208,7 +208,7 @@ enum class ExprType {
     // unbatch a batch dimension to specify final computation of gradient update
     Unbatch,
     // let bindings. 
-    Let, 
+    // Let, 
 };
 
 static const int MAXARGS = 30;
@@ -216,10 +216,14 @@ static const int MAXPRED = 30;
 
 struct Expr {
     ExprType ty = ExprType::Undef;
-    Arr val;
+
+
+    // if it's an Expr::Arr, this is the name of the array.
+    string arrname;
+
     // if it's a virtual node such as AllZeros, AllOnes, this will be its
     // length.
-    Shape virtual_sh;
+    Shape sh;
 
     Expr *args[MAXARGS] = { nullptr };
     int nargs = 0;
@@ -245,12 +249,10 @@ struct Expr {
         if (ty < other.ty) { return true; }
         if (ty > other.ty) { return false; }
         
-        if (val.name < other.val.name) { return true; }
-        if (val.name > other.val.name) { return false; }
         /*
         if ((ty == ExprType::AllOnes || ty == ExprType::AllZeros || ty ==
                     ExprType::Index || ty == ExprType::Unbatch || ty ==
-                    ExprType :: Replicate) && (virtual_sh < other.virtual_sh)) {
+                    ExprType :: Replicate) && (sh < other.sh)) {
             return true;
         }
         */
@@ -276,10 +278,9 @@ struct Expr {
 
     bool operator != (const Expr &other) const {
         if (ty != other.ty) { return true; }
-        if (val != other.val) { return true; }
         if ((ty == ExprType::AllOnes || ty == ExprType::AllZeros || ty ==
                     ExprType::Index || ty == ExprType::Unbatch || ty ==
-                    ExprType :: Replicate) && virtual_sh != other.virtual_sh) {
+                    ExprType :: Replicate) && sh != other.sh) {
             return true;
         }
 
@@ -300,49 +301,62 @@ struct Expr {
         return !(*this == other);
     }
 
-    static Expr *arr(Arr a) {
+    static Expr *arr(string name, Shape sh) {
         Expr *e = new Expr;
-        e->val = a;
+        e->arrname = name;
+        e->sh = sh;
         e->ty = ExprType::Arr;
         return e;
+    }
+
+    static Expr *arr(string name, int dim1) {
+        return Expr::arr(name, Shape::oned(dim1));
+    }
+
+    static Expr *arr(string name, int dim1, int dim2) {
+        return Expr::arr(name, Shape::twod(dim1, dim2));
     }
 
     static Expr* add(Expr *l, Expr *r) {
         if (l->ty == ExprType::AllZeros) return r;
         if (r->ty == ExprType::AllZeros) return l;
 
-        Shape shunified = Shape::unify(l->sh(), r->sh());
+        Shape shunified = Shape::unify(l->sh, r->sh);
+
         l = Expr::replicate(l, shunified);
         r = Expr::replicate(r, shunified);
 
         Expr *e = new Expr;
+        e->sh = shunified;
         e->ty = ExprType::Add;
         e->addarg(l); 
         e->addarg(r);
-        e->val = Arr(shunified, e->to_str());
+        // e->val = Arr(shunified, e->to_str());
         return e;
     }
 
     static Expr* sub(Expr *l, Expr *r) {
-        Shape shunified = Shape::unify(l->sh(), r->sh());
+        Shape shunified = Shape::unify(l->sh, r->sh);
+
         l = Expr::replicate(l, shunified);
         r = Expr::replicate(r, shunified);
 
         Expr *e = new Expr;
+        e->sh = shunified;
         e->ty = ExprType::Sub;
         e->addarg(l); 
         e->addarg(r);
-        e->val = Arr(Shape::unify(l->sh(), r->sh()), e->to_str());
         return e;
     }
 
     static Expr *pointwisemul(Expr *l,  Expr *r) {
-        Shape shunified = Shape::unify(l->sh(), r->sh());
+        Shape shunified = Shape::unify(l->sh, r->sh);
         l = Expr::replicate(l, shunified);
         r = Expr::replicate(r, shunified);
 
         Expr *e = new Expr;
         e->ty = ExprType::PointwiseMul;
+        e->sh = shunified;
         e->addarg(l);
         e->addarg(r);
         return e;
@@ -353,10 +367,10 @@ struct Expr {
         e->ty = ExprType::MatMatMul;
         e->addarg(l);
         e->addarg(r);
-        assert(l->sh().ndim == 2);
-        assert(r->sh().ndim == 2);
-        assert(l->sh()[1] == r->sh()[0]);
-        e->val = Arr(Shape::twod(l->sh()[0], r->sh()[1]), e->to_str());
+        assert(l->sh.ndim == 2);
+        assert(r->sh.ndim == 2);
+        assert(l->sh[1] == r->sh[0]);
+        e->sh = Shape::twod(l->sh[0], r->sh[1]);
         return e;
     }
 
@@ -366,23 +380,23 @@ struct Expr {
         e->addarg(l);
         e->addarg(r);
 
-        assert(l->sh().ndim == 2);
-        assert(r->sh().ndim == 1);
-        assert(l->sh()[1] == r->sh()[0]);
-        e->val = Arr(r->sh(), e->to_str());
+        assert(l->sh.ndim == 2);
+        assert(r->sh.ndim == 1);
+        assert(l->sh[1] == r->sh[0]);
+        e->sh = Shape::oned(l->sh[0]);
         return e;
 
     }
 
     static Expr *replicate(Expr *inner, Shape replicatesh) {
         // constant fold directly in the replicate()
-        if (inner->sh() == replicatesh) return inner;
+        if (inner->sh == replicatesh) return inner;
 
         Expr *e = new Expr;
         e->ty = ExprType::Replicate;
         e->addarg(inner);
         // the new shape is that of the shape we want to replicate to
-        e->virtual_sh = replicatesh;
+        e->sh = replicatesh;
         return e;
     }
 
@@ -393,8 +407,9 @@ struct Expr {
         e->addarg(l); 
         e->addarg(r);
 
-        // assert(this->sh() == other->sh());
-        e->val = Arr(1, e->to_str());
+        // assert(this->sh == other->sh);
+        e->sh = Shape::zerod();
+        // e->val = Arr(1, e->to_str());
         return e;
     }
 
@@ -402,7 +417,7 @@ struct Expr {
         Expr *e = new Expr;
         e->ty = ExprType::Tanh;
         e->addarg(inner);
-        e->val = Arr(inner->sh(), e->to_str());
+        e->sh = inner->sh;
         return e;
     }
 
@@ -410,7 +425,7 @@ struct Expr {
         Expr *e = new Expr;
         e->ty = ExprType::DerTanh;
         e->addarg(inner);
-        e->val = Arr(inner->sh(), e->to_str());
+        e->sh = inner->sh;
         return e;
     }
 
@@ -418,7 +433,7 @@ struct Expr {
     static Expr *allones(Shape sh) {
         Expr *e = new Expr;
         e->ty = ExprType::AllOnes;
-        e->virtual_sh = sh;
+        e->sh = sh;
         return e;
     }
 
@@ -426,13 +441,13 @@ struct Expr {
     static Expr *allzeros(Shape sh) {
         Expr *e = new Expr;
         e->ty = ExprType::AllZeros;
-        e->virtual_sh = sh;
+        e->sh = sh;
         return e;
     }
 
     static Expr *index(Expr *arr, Expr *index) {
         // indexing array is 1D. Contains offsets into array.
-        assert(index->sh().ndim == 1);
+        assert(index->sh.ndim == 1);
 
         Expr *e = new Expr;
         e->addarg(arr);
@@ -445,9 +460,7 @@ struct Expr {
         // out[index[0]] = [1 0 0]
         // out[index[1]] = [0 1 0]
         // size of out: inner * len(index)
-        e->virtual_sh =
-            arr->sh().removeOutermost().addOutermost(index->sh().vals[0]);
-        e->val = Arr(e->virtual_sh, e->to_str());
+        e->sh = arr->sh.removeOutermost().addOutermost(index->sh.vals[0]);
         return e;
         
     }
@@ -456,7 +469,8 @@ struct Expr {
         Expr *e = new Expr;
         e->addarg(arr);
         e->ty = ExprType::Batch;
-        e->val = Arr(arr->sh(), e->to_str());
+        // e->val = Arr(arr->sh, e->to_str());
+        e->sh = arr->sh.removeOutermost();
         return e;
     }
 
@@ -465,8 +479,8 @@ struct Expr {
         e->addarg(arr);
         e->ty = ExprType::Unbatch;
         // TODO: check that this matches the inner Batch() sizes.
-        e->virtual_sh = arr->sh().addOutermost(batchsize); 
-        e->val = Arr(e->virtual_sh, e->to_str());
+        e->sh = arr->sh.addOutermost(batchsize); 
+        // e->val = Arr(e->sh, e->to_str());
         return e;
     }
 
@@ -474,29 +488,34 @@ struct Expr {
         Expr *e = new Expr;
         e->ty = ExprType::Constant;
         e->constval = c;
-        e->virtual_sh = Shape::zerod();
-        e->val = Arr(e->virtual_sh, e->to_str());
+        e->sh = Shape::zerod();
+        // e->val = Arr(e->sh, e->to_str());
         return e;
     }
 
+    /*
     static Expr *let(Arr lhs, Expr *rhs, Expr *in) {
         Expr *e = new Expr;
         e->ty = ExprType::Let;
         e->val = lhs;
         e->args[0] = rhs;
         e->args[1] = in;
-        assert(e->val.sh == e->args[0]->sh());
+        e->sh = in->sh;
+        // assert(e->val.sh == e->args[0]->sh);
         return e;
-    }  
+    } 
+    */
 
-    Expr *grad(Arr dx) {
-        return grad_(dx, dx.sh, {{dx.name, Expr::allones(dx.sh)}});
+    Expr *grad(Expr *dx) {
+        assert(dx->ty == ExprType::Arr);
+        return grad_(dx, dx->sh, {{dx->arrname, Expr::allones(dx->sh)}});
     }
 
 
     // return the expression for the gradient with the other array
-    Expr *grad_(Arr dx, Shape outsh, map<string, Expr *> dermap) {
+    Expr *grad_(Expr *dx, Shape outsh, map<string, Expr *> dermap) {
         switch(ty) {
+            /*
             case ExprType::Let: {
                 Arr darr = Arr(val.sh, "d" + val.name);
                 Expr *darrval =  args[0]->grad_(dx, val.sh, dermap);
@@ -508,12 +527,13 @@ struct Expr {
 
                 return Expr::let(darr, darrval, Expr::let(val, args[0], inner));
             }
+            */
             case ExprType::Arr:  {
                 // find this array in the derivative map.
-                auto it = dermap.find(this->val.name);                
+                auto it = dermap.find(this->arrname);                
                  // if it's in the map, return the value
                 if (it != dermap.end()) { return new Expr(*it->second); }
-                else { return Expr::allzeros(sh()); }
+                else { return Expr::allzeros(sh); }
 
              }
             case ExprType::Add:
@@ -523,26 +543,26 @@ struct Expr {
             case ExprType::Dot:
                 return Expr::add(Expr::pointwisemul(args[0]->grad_(dx, outsh, dermap), args[1]),
                         Expr::pointwisemul(args[0], args[1]->grad_(dx, outsh, dermap)));
-            // (1 - tanh^2 X) .* X'
+            // d/dx [tanh(i)] = tanh'(i) . di/dx
             case ExprType::Tanh: {
-                Expr *dinner = args[0]->grad_(dx, args[0]->sh(), dermap);
+                Expr *dinner = args[0]->grad_(dx, args[0]->sh, dermap);
                 return Expr::pointwisemul(Expr::dertanh(args[0]), dinner);
              }
             case ExprType::MatMatMul: {
                     assert(false && "need to implement replicate");
-                   return Expr::add(Expr::matmatmul(args[0]->grad_(dx, args[0]->sh(), dermap), args[1]),
-                           Expr::matmatmul(args[0], args[1]->grad_(dx, args[1]->sh(), dermap)));
+                   return Expr::add(Expr::matmatmul(args[0]->grad_(dx, args[0]->sh, dermap), args[1]),
+                           Expr::matmatmul(args[0], args[1]->grad_(dx, args[1]->sh, dermap)));
 
                }
             case ExprType::MatVecMul: {
                    // TODO!! What is the justification for the "fit shape"??
                    // (d/dN(M x) = M [dx/dN] + [dM/dy]
                    return Expr::add(
-                           Expr::replicate(Expr::matvecmul(args[0]->grad_(dx, args[0]->sh(), dermap), args[1]), outsh),
-                           Expr::replicate(Expr::matvecmul(args[0], args[1]->grad_(dx, args[1]->sh(), dermap)), outsh));
+                           Expr::replicate(Expr::matvecmul(args[0]->grad_(dx, args[0]->sh, dermap), args[1]), outsh),
+                           Expr::replicate(Expr::matvecmul(args[0], args[1]->grad_(dx, args[1]->sh, dermap)), outsh));
                }
             case ExprType::Batch: {
-                return Expr::batch(args[0]->grad_(dx, args[0]->sh(), dermap));
+                return Expr::batch(args[0]->grad_(dx, args[0]->sh, dermap));
             }
 
             default:
@@ -551,6 +571,7 @@ struct Expr {
         }
     }
     
+    /*
     void force() {
         switch(ty) {
             case ExprType::Arr: return;
@@ -558,7 +579,7 @@ struct Expr {
             case ExprType::Add: {
                     args[0]->force();
                     args[1]->force();
-                for(int i = 0; i < args[0]->sh().nelem(); ++i) {
+                for(int i = 0; i < args[0]->sh.nelem(); ++i) {
                     val[i] = args[0]->at(i) + args[1]->at(i);
                 }
                 return;
@@ -566,7 +587,7 @@ struct Expr {
             case ExprType::Sub: {
                     args[0]->force();
                     args[1]->force();
-                for(int i = 0; i < args[0]->sh().nelem(); ++i) {
+                for(int i = 0; i < args[0]->sh.nelem(); ++i) {
                     val[i] = args[0]->at(i) - args[1]->at(i);
                 }
                 return;
@@ -575,24 +596,24 @@ struct Expr {
                     args[0]->force();
                     args[1]->force();
                     val[0] = 0;
-                    assert(args[0]->sh().ndim == 1);
-                    assert(args[1]->sh().ndim == 1);
+                    assert(args[0]->sh.ndim == 1);
+                    assert(args[1]->sh.ndim == 1);
 
-                    for(int i = 0; i < args[0]->sh().nelem(); ++i) {
+                    for(int i = 0; i < args[0]->sh.nelem(); ++i) {
                         val[0] += args[0]->at(i) * args[1]->at(i);
                     }
                     return;
             case ExprType::PointwiseMul:
                     args[0]->force();
                     args[1]->force();
-                    for(int i = 0; i < args[0]->sh().nelem(); ++i) {
+                    for(int i = 0; i < args[0]->sh.nelem(); ++i) {
                             val[i] = args[0]->at(i) * args[1]->at(i);
                     }
                     return;
 
             case ExprType::Tanh: 
                     args[0]->force();
-                    for(int i = 0; i < args[0]->sh().nelem(); ++i) {
+                    for(int i = 0; i < args[0]->sh.nelem(); ++i) {
                         val[i] = tanhf(args[0]->at(i));
                     }
                     return;
@@ -602,10 +623,10 @@ struct Expr {
                     args[0]->force();
                     args[1]->force();
 
-                    int M = args[0]->sh()[0];
-                    int N = args[0]->sh()[1];
-                    assert(N == args[1]->sh()[0]);
-                    int O = args[1]->sh()[1];
+                    int M = args[0]->sh[0];
+                    int N = args[0]->sh[1];
+                    assert(N == args[1]->sh[0]);
+                    int O = args[1]->sh[1];
 
                     for(int i = 0; i < M; ++i) {
                         for(int j = 0; j < O; ++j) {
@@ -623,9 +644,9 @@ struct Expr {
                     args[0]->force();
                     args[1]->force();
 
-                    int M = args[0]->sh()[0];
-                    int N = args[0]->sh()[1];
-                    assert(N == args[1]->sh()[0]);
+                    int M = args[0]->sh[0];
+                    int N = args[0]->sh[1];
+                    assert(N == args[1]->sh[0]);
 
                     for(int i = 0; i < M; ++i) {
                         val[i] = 0;
@@ -642,9 +663,9 @@ struct Expr {
                 args[1]->force();
                 // args[0] == array.
                 // args[1] == index set
-                for(int i = 0; i < args[1]->sh().nelem(); ++i) {
+                for(int i = 0; i < args[1]->sh.nelem(); ++i) {
                     const int ix = args[1]->val[i];                    
-                    const int stride = args[0]->sh().removeOutermost().nelem();
+                    const int stride = args[0]->sh.removeOutermost().nelem();
                     // array shape: 3 3 [1 0 0; 0 1 0; 0 0 1]
                     // index set: 1 [1 2]
                     // out[index[0]] = [1 0 0]
@@ -661,7 +682,9 @@ struct Expr {
           default: cerr << to_str(); assert(false && "unhandled"); 
         }
     }
+    */
 
+    /*
     float at(int ix) { 
         switch(ty) {
             case ExprType::AllOnes:
@@ -671,46 +694,47 @@ struct Expr {
             case ExprType::Replicate:
                 // find the value of the index wrt the replication
                 // a[i, j, k] -> a[i]
-                return args[0]->at(ix % args[0]->sh().nelem());
+                return args[0]->at(ix % args[0]->sh.nelem());
 
             default:
                 return val[ix];
         }
     }
+    */
 
-    Shape sh() {
+        /*
         switch(ty) {
-            case ExprType::Arr: return val.sh;
-            case ExprType::AllOnes: return virtual_sh;
-            case ExprType::AllZeros: return virtual_sh;
-            case ExprType::Index: return virtual_sh;
-            case ExprType::Unbatch: return virtual_sh;
-            case ExprType::Replicate: return virtual_sh;
-            case ExprType::Tanh: return args[0]->sh();
-            case ExprType::DerTanh: return args[0]->sh();
-            case ExprType::Batch: return args[0]->sh().removeOutermost();
+            case ExprType::Arr: return sh;
+            case ExprType::AllOnes: return sh;
+            case ExprType::AllZeros: return sh;
+            case ExprType::Index: return sh;
+            case ExprType::Unbatch: return sh;
+            case ExprType::Replicate: return sh;
+            case ExprType::Tanh: return args[0]->sh;
+            case ExprType::DerTanh: return args[0]->sh;
+            case ExprType::Batch: return args[0]->sh.removeOutermost();
             case ExprType::Constant: return Shape::zerod(); 
             case ExprType::Add: 
-                return Shape::unify(args[0]->sh(), args[1]->sh());
+                return Shape::unify(args[0]->sh, args[1]->sh);
             case ExprType::Sub: 
-                return Shape::unify(args[0]->sh(), args[1]->sh());
+                return Shape::unify(args[0]->sh, args[1]->sh);
             case ExprType::PointwiseMul:
-                return Shape::unify(args[0]->sh(), args[1]->sh());
+                return Shape::unify(args[0]->sh, args[1]->sh);
             // TODO: find shape of contraction.
             case ExprType::MatMatMul:
-                return Shape::twod(args[0]->sh()[0], args[1]->sh()[1]);
+                return Shape::twod(args[0]->sh[0], args[1]->sh[1]);
             case ExprType::MatVecMul:
-                return Shape::oned(args[0]->sh()[0]);
+                return Shape::oned(args[0]->sh[0]);
 
             default:
                 assert (false && "unimplemented sh()");
         }
-    }
+        */
 
 
     string to_str() const {
         switch(ty) {
-            case ExprType::Arr: return val.name;
+            case ExprType::Arr: return arrname;
             case ExprType::AllOnes: return "11..1";
             case ExprType::AllZeros: return "00..0";
             case ExprType::Add: 
@@ -744,7 +768,7 @@ struct Expr {
                         args[1]->to_str() + ")";
 
             case ExprType::Replicate: 
-                return "(replicate " + virtual_sh.to_str() + " " + 
+                return "(replicate " + sh.to_str() + " " + 
                     args[0]->to_str()+ ")";
 
             case ExprType::Index: 
@@ -753,13 +777,15 @@ struct Expr {
             case ExprType::Batch:
                 return "(batch " + args[0]->to_str() + ")";
             case ExprType::Unbatch:
-                return "(unbatch " + to_string(virtual_sh[0]) + " " + 
+                return "(unbatch " + to_string(sh[0]) + " " + 
                     args[0]->to_str() + ")";
             case ExprType::Constant:
                 return "(constant " + to_string(constval) + ")";
+            /*
             case ExprType::Let:
-                return "(let " + val.name + " := " + args[0]->to_str() +  
+                return "(let " + ame + " := " + args[0]->to_str() +  
                     " in " + args[1]->to_str() + ")";
+            */
             default:
                 assert(false && "unimplemented to_str()");
 
@@ -854,7 +880,7 @@ Expr *constantfold(Expr *e) {
         case ExprType::PointwiseMul:
             if (e->args[0]->ty == ExprType::AllZeros || 
                     e->args[1]->ty == ExprType::AllZeros) {
-                return Expr::allzeros(e->sh());
+                return Expr::allzeros(e->sh);
             }
             if (e->args[0]->ty == ExprType::AllOnes) {
                 return constantfold(e->args[1]);
@@ -867,7 +893,7 @@ Expr *constantfold(Expr *e) {
         case ExprType::MatVecMul:
             if (e->args[0]->ty == ExprType::AllZeros || 
                     e->args[1]->ty == ExprType::AllZeros) {
-                return Expr::allzeros(e->sh());
+                return Expr::allzeros(e->sh);
             }
             if (e->args[0]->ty == ExprType::AllOnes) {
                 return constantfold(e->args[1]);
@@ -882,7 +908,7 @@ Expr *constantfold(Expr *e) {
         case ExprType::Add:
             if(e->args[0]->ty == ExprType::AllZeros && 
                     e->args[1]->ty == ExprType::AllOnes) {
-                return Expr::allones(e->sh());
+                return Expr::allones(e->sh);
             }
             if(e->args[0]->ty == ExprType::AllZeros) {
                 return constantfold(e->args[1]);
@@ -899,25 +925,25 @@ Expr *constantfold(Expr *e) {
             return Expr::sub(constantfold(e->args[0]), constantfold(e->args[1]));
 
         case ExprType::Replicate:
-            if (e->args[0]->sh() == e->virtual_sh) {
+            if (e->args[0]->sh == e->sh) {
                 return constantfold(e->args[0]);
             } 
             else if (e->args[0]->ty == ExprType::AllOnes) {
-                return Expr::allones(e->virtual_sh);
+                return Expr::allones(e->sh);
             }
             else if (e->args[0]->ty == ExprType::AllZeros) {
-                return Expr::allzeros(e->virtual_sh);
+                return Expr::allzeros(e->sh);
             }
             else {
-                return Expr::replicate(constantfold(e->args[0]), e->virtual_sh);
+                return Expr::replicate(constantfold(e->args[0]), e->sh);
             }
 
         case ExprType::Batch:
             if (e->args[0]->ty == ExprType::AllZeros) {
-                return Expr::allzeros(e->sh());
+                return Expr::allzeros(e->sh);
             }
             else if (e->args[0]->ty == ExprType::AllOnes) {
-                return Expr::allones(e->sh());
+                return Expr::allones(e->sh);
             }
             return Expr::batch(constantfold(e->args[0]));
 
@@ -925,8 +951,13 @@ Expr *constantfold(Expr *e) {
     }
 }
 
+Expr *simplify(Expr *e) {
+    for(int i = 0; i < 10; ++i) e = constantfold(e);
+    return e;
+}
+
+/*
 void test_expr_let_bindings() {
-    {
         cout << "Let bindings\n\n";
 
         const int N = 3;
@@ -937,176 +968,176 @@ void test_expr_let_bindings() {
         afour = Expr::let(asq, Expr::add(Expr::arr(arra), Expr::arr(arra)), afour);
         cout << "a^4: " << afour->to_str() << "\n\n";
         cout << "a^4->grad[a]: " << afour->grad(arra)->to_str() << "\n\n";
-    }
 }
+*/
 
 void test_expr_dot() {
-    {
+    cout << "***dot***\n";
     const int N = 3;
-    Arr arra = Arr(N, "a");
-    Arr arrb = Arr(N, "b");
-    for(int i = 0; i < N; ++i) arra[i] = i;
-    for(int i = 0; i < N; ++i) arrb[i] = i*2;
-    Expr *a = Expr::arr(arra);
-    Expr *b = Expr::arr(arrb);
+    Expr *a = Expr::arr("a", Shape::oned(N));
+    Expr *b = Expr::arr("b", Shape::oned(N));
 
-    Expr *add = Expr::add(a, b);
+    // Expr *add = Expr::add(a, b);
     Expr *dot = Expr::dot(a, b);
-    cout << dot->to_str();
+    cout << "dot: " << dot->to_str();
 
-    // force this thunk.
-    dot->force();
-
-    cout << "arra:\n"; arra.print_data();
-    cout << "\narrb:"; arrb.print_data();
-    cout << "\nadd:"; add->val.print_data();
-
-    cout << "\ndot: "; cout << dot->to_str();
-    cout << "\ndot: "; dot->val.print_data();
-
-    Expr *dotder = dot->grad(arrb);
-    cout << "grad of dot wrt b:";
-    cout << ": " << dotder->to_str();
+    Expr *dotder = dot->grad(b);
+    cout << "\ngrad of dot wrt b: " << dotder->to_str();
 
     for(int i = 0; i < 3; ++i) {
         dotder = constantfold(dotder);
     }
-
     cout << " | simpl " << dotder->to_str();
+
+    dotder = dot->grad(a);
+    cout << "\ngrad of dot wrt a:" << dotder->to_str();
+    for(int i = 0; i < 3; ++i) {
+        dotder = constantfold(dotder);
     }
+    cout << " | simpl " << dotder->to_str();
+    cout << "\n";
+}
+
+
+void test_expr_tanh_matvec() {
+    cout << "***Tanh(Ax)***\n";
+    static const int N = 3;
+    static const int M = 5;
+    Expr *A = Expr::arr("A", Shape::twod(N, M));
+    Expr *x = Expr::arr("x", Shape::oned(M));
+
+    Expr *out = Expr::tanh(Expr::matvecmul(A, x));
+    cout << "out: " << out->to_str() << "\n";
+    cout << "out->grad[A]: " << out->grad(A)->to_str() << "\n";
+    cout << "out->grad[A]: " << simplify(out->grad(A))->to_str() << "\n";
+    cout << "out->grad[x]: " << simplify(out->grad(x))->to_str() << "\n";
 }
 
 void test_expr_rnn() {
-    {
-        cout << "\n\n\nRNN Computation\n\n\n";
-        // joint modelling of words and corpus
-        static const int windowsize = 3;
-        static const int embedsize = 4;
-        static const int hiddensize = 10;
-        vector<int> sentence;
-        vector<Arr> embeds;
-        Expr *inputs[windowsize];
-        Expr *hiddens[windowsize+1];
+    // joint modelling of words and corpus
+    static const int windowsize = 3;
+    static const int embedsize = 4;
+    static const int hiddensize = 10;
+    vector<int> sentence;
+    vector<Expr *> embeds;
+    Expr *inputs[windowsize];
+    Expr *hiddens[windowsize+1];
 
-        Arr H2H = Arr(hiddensize, hiddensize, "H2H");
-        Arr I2H = Arr(hiddensize, embedsize, "I2H");
-        Arr H2HBias = Arr(hiddensize, "H2HBias");
+    Expr *H2H = Expr::arr("H2H", hiddensize, hiddensize);
+    Expr *I2H = Expr::arr("I2h", hiddensize, embedsize);
 
-        Arr H2O = Arr(embedsize, hiddensize, "H2O");
-        Arr H2OBias = Arr(embedsize, "H2OBias");
+    Expr *H2O = Expr::arr("H2O", embedsize, hiddensize);
+    Expr *H2OBias = Expr::arr("H2OBias", embedsize);
 
-        for(int i = 0; i < (int)vocab.size(); ++i) {
-            embeds[i] = Arr(embedsize, ix2word[i]);
-        }
-
-        for(int i = 0; i < windowsize; ++i) {
-            inputs[i] = Expr::arr(Arr(embedsize, "i" + std::to_string(i)));
-        }
-
-        hiddens[0] = Expr::arr(Arr(hiddensize, "hinit"));
-        for(int i = 1; i <= windowsize; ++i) {
-            hiddens[i] = Expr::tanh(Expr::add(Expr::matvecmul(Expr::arr(I2H), inputs[i-1]),
-                        Expr::matvecmul(Expr::arr(H2H), hiddens[i-1])));
-        }
-
-        Expr *out = Expr::tanh(Expr::add(Expr::matvecmul(Expr::arr(H2O), hiddens[windowsize]), Expr::arr(H2OBias)));
-        cout << "out: " << out->to_str() << "\n";
-
-        Expr *H2Hgrad = out->grad(H2H);
-        for(int i = 0; i < 6; ++i) {
-            cout << "\n" << i << "| out->grad[H2H]:" << H2Hgrad->to_str();
-                H2Hgrad = constantfold(H2Hgrad);
-        }
-
-        commonSubexpressionElimination(H2Hgrad);
-
-        Expr *H2OGrad = out->grad(H2O);
-        for(int i = 0; i < 6; ++i) {
-            cout << "\n" << i << "| out->grad[H2O]:" << H2OGrad->to_str();
-                H2OGrad = constantfold(H2OGrad);
-        }
-
+    for(int i = 0; i < (int)vocab.size(); ++i) {
+        embeds[i] = Expr::arr(ix2word[i], embedsize);
     }
+
+    for(int i = 0; i < windowsize; ++i) {
+        inputs[i] = Expr::arr("i" + std::to_string(i), embedsize);
+    }
+
+    hiddens[0] = Expr::arr("hinit", hiddensize);
+    for(int i = 1; i <= windowsize; ++i) {
+        hiddens[i] = Expr::tanh(Expr::add(Expr::matvecmul(I2H, inputs[i-1]),
+                    Expr::matvecmul(H2H, hiddens[i-1])));
+    }
+
+    Expr *out = Expr::tanh(Expr::add(Expr::matvecmul(H2O, hiddens[windowsize]), H2OBias));
+    cout << "out: " << out->to_str() << "\n";
+
+    Expr *H2Hgrad = out->grad(H2H);
+    for(int i = 0; i < 6; ++i) {
+        cout << "\n" << i << "| out->grad[H2H]:" << H2Hgrad->to_str();
+        H2Hgrad = constantfold(H2Hgrad);
+    }
+
+    commonSubexpressionElimination(H2Hgrad);
+
+    Expr *H2OGrad = out->grad(H2O);
+    for(int i = 0; i < 6; ++i) {
+        cout << "\n" << i << "| out->grad[H2O]:" << H2OGrad->to_str();
+        H2OGrad = constantfold(H2OGrad);
+    }
+
 }
 
 void test_expr_rnn_batched() {
-
-    
-    {
-        cout << "\n\n\nRNN Computation with batching\n\n\n";
-        // joint modelling of words and corpus
-        static const int batchsize = 2;
-        static const int windowsize = 1;
-        static const int embedsize = 4;
-        static const int hiddensize = 10;
-        vector<int> sentence;
-        vector<Arr> embeds;
-
-        
-        Arr H2H = Arr(hiddensize, hiddensize, "H2H");
-        Arr I2H = Arr(hiddensize, embedsize, "I2H");
-        Arr H2HBias = Arr(hiddensize, "H2HBias");
-
-        Arr H2O = Arr(embedsize, hiddensize, "H2O");
-        Arr H2OBias = Arr(embedsize, "H2OBias");
-
-        for(int i = 0; i < (int)vocab.size(); ++i) {
-            embeds[i] = Arr(embedsize, ix2word[i]);
-        }
-
-        // inputs: batchsize x embedsize
-        Expr *inputs[windowsize];
-        for(int i = 0; i < windowsize; ++i) {
-            inputs[i] = Expr::arr(Arr(batchsize, embedsize, "i_batched" + std::to_string(i)));
-        }
-
-        // outputs array, batchsize x embedsize
-        Arr outputs = Arr(batchsize, embedsize, "output_batched");
-
-        Expr *hiddens[windowsize+1];
-
-        // create the compute kernel
-        hiddens[0] = Expr::arr(Arr(hiddensize, "hinit"));
-        for(int i = 1; i <= windowsize; ++i) {
-            hiddens[i] = Expr::tanh(Expr::add(Expr::matvecmul(Expr::arr(I2H), Expr::batch(inputs[i-1])),
-                        Expr::matvecmul(Expr::arr(H2H), hiddens[i-1])));
-        }
-
-        // should be batchsize x embedsize, but our kernel pretends it is embedsize
-        Expr *predict = Expr::tanh(Expr::add(Expr::matvecmul(Expr::arr(H2O), hiddens[windowsize]), Expr::arr(H2OBias)));
-
-        cout << "RNN prediction:\n" << predict->to_str();
-
-        // full loss
-        Expr *loss = Expr::sub(Expr::batch(Expr::arr(outputs)), predict);
-        cout << "\n\nRRN loss:\n" << loss->to_str();
-
-        // find derivative of loss wrt H2H, H2O, I2H, H2OBias
-        Expr *H2Hgrad = loss->grad(H2H);
-        for(int i = 0; i < 6; ++i) {
-            cout << "\n" << i << "| out->grad[H2H]:" << H2Hgrad->to_str();
-                H2Hgrad = constantfold(H2Hgrad);
-        }
-        cout << "\n\n";
-
-        
-        Expr *H2Ograd = loss->grad(H2O);
-        cout << "\n\nloss->grad[H2O]: " << H2Ograd->to_str();
-        
-        Expr *I2Hgrad = loss->grad(I2H);
-        cout << "\n\nloss->grad[I2H]: " << I2Hgrad->to_str();
-        
-        Expr *H2OBiasgrad = loss->grad(H2OBias);
-        cout << "\n\nloss->grad[H2OBias]: " << H2OBiasgrad->to_str();
-        
-        
-        // scaled gradient
-        const float learningrate = 1e-2;
-        Expr *H2hgradscaled = Expr::pointwisemul(Expr::constant(learningrate), H2Hgrad);
-        cout << "\n\nlearningrate * loss->grad[H2H]:\n" << H2hgradscaled->to_str();
+    cout << "\n***RNN Computation with batching***\n";
+    // joint modelling of words and corpus
+    static const int batchsize = 2;
+    static const int windowsize = 1;
+    static const int embedsize = 4;
+    static const int hiddensize = 10;
+    vector<int> sentence;
+    Expr *embeds[vocab.size()];
 
 
-    }   
+    Expr *H2H = Expr::arr("H2H", hiddensize, hiddensize);
+    Expr *I2H = Expr::arr("I2H", hiddensize, embedsize);
+    // Expr *H2HBias = Expr::arr("H2HBias", hiddensize);
+
+    Expr *H2O = Expr::arr("H2O", embedsize, hiddensize);
+    Expr *H2OBias = Expr::arr("H2OBias", embedsize);
+
+    for(int i = 0; i < (int)vocab.size(); ++i) {
+        embeds[i] = Expr::arr(ix2word[i], embedsize);
+        (void)embeds[i];
+    }
+
+    // inputs: batchsize x embedsize
+    Expr *inputs[windowsize];
+    for(int i = 0; i < windowsize; ++i) {
+        inputs[i] = Expr::arr( "i_batched" + std::to_string(i), batchsize,
+                embedsize);
+    }
+
+    // outputs array, batchsize x embedsize
+    Expr *outputs = Expr::arr("output_batched", batchsize, embedsize);
+
+    Expr *hiddens[windowsize+1];
+
+    // create the compute kernel
+    hiddens[0] = Expr::arr("hinit", hiddensize);
+    for(int i = 1; i <= windowsize; ++i) {
+        hiddens[i] = Expr::tanh(Expr::add(Expr::matvecmul(I2H,
+                        Expr::batch(inputs[i-1])),
+                    Expr::matvecmul(H2H, hiddens[i-1])));
+    }
+
+    // should be batchsize x embedsize, but our kernel pretends it is embedsize
+    Expr *predict = Expr::tanh(Expr::add(Expr::matvecmul(H2O,
+                    hiddens[windowsize]), H2OBias));
+
+    cout << "RNN prediction:\n" << predict->to_str();
+
+    // full loss
+    Expr *loss = Expr::sub(Expr::batch(outputs), predict);
+    cout << "\n\nRRN loss:\n" << loss->to_str();
+
+    // find derivative of loss wrt H2H, H2O, I2H, H2OBias
+    Expr *H2Hgrad = loss->grad(H2H);
+    for(int i = 0; i < 6; ++i) {
+        cout << "\n" << i << "| out->grad[H2H]:" << H2Hgrad->to_str();
+        H2Hgrad = constantfold(H2Hgrad);
+    }
+    cout << "\n\n";
+
+
+    Expr *H2Ograd = loss->grad(H2O);
+    cout << "\n\nloss->grad[H2O]: " << H2Ograd->to_str();
+
+    Expr *I2Hgrad = loss->grad(I2H);
+    cout << "\n\nloss->grad[I2H]: " << I2Hgrad->to_str();
+
+    Expr *H2OBiasgrad = loss->grad(H2OBias);
+    cout << "\n\nloss->grad[H2OBias]: " << H2OBiasgrad->to_str();
+
+
+    // scaled gradient
+    const float learningrate = 1e-2;
+    Expr *H2hgradscaled = Expr::pointwisemul(Expr::constant(learningrate), H2Hgrad);
+    cout << "\n\nlearningrate * loss->grad[H2H]:\n" << H2hgradscaled->to_str();
 
 }
 
@@ -1205,6 +1236,7 @@ int main(int argc, char **argv) {
 
     // use_expr();
     test_expr_dot();
+    test_expr_tanh_matvec();
     test_expr_rnn_batched();
     
 }

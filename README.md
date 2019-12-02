@@ -13,6 +13,8 @@ I keep whining about how PyTorch is slow and TensorFlow makes me want to kill
 myself, so I might as well be the change I want to see in the world
 with regards to libraries for machine learning...
 
+We need an abstraction called `Program`, which is a sequence of `Stmt`s...
+
 ## `lstm.py`
 
 jointly train the language model with the word embedding. Use `--train` to
