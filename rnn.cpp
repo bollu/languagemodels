@@ -6,6 +6,7 @@
 #include <unordered_map>
 #include <stdio.h>
 #include <map>
+#include <list>
 #include <assert.h>
 #include <stdlib.h>
 #include <string.h>
@@ -149,6 +150,7 @@ enum class ExprType {
     Contract,
     Delta,
     ConstantInt,
+    ConstantFloat,
     Tanh,
 };
 
@@ -189,12 +191,16 @@ struct Expr {
     virtual Expr *grad(string name, vector<Index> ixs) = 0;
 
     string detailed_to_str() const {
-        string s = to_str();
-        s += "[";
+        string s = "";
+        s += "[[";
         for(Index i : free()) s += i.name + ",";
-        s += "]";
+        s += "]] ";
+        s += to_str();
         return s;
     }
+
+    // simplify the expression to normal form
+    Expr *normalize();
 
 };
 
@@ -213,6 +219,23 @@ struct ConstantInt : public Expr {
     }
 
 };
+
+struct ConstantFloat : public Expr {
+    float f;
+    ConstantFloat(float f) : Expr(ExprType::ConstantFloat), f(f) {};
+
+    string to_str() const { return std::to_string(f); }
+    set<Index> free() const { return {}; }
+    Expr *grad(string name, vector<Index> ixs) { 
+        return new ConstantInt(0);
+    }
+
+    Expr *subst(Index old, Index new_) const {
+        return new ConstantFloat(f);
+    }
+
+};
+
 
 struct Delta : public Expr {
     Index old;
@@ -560,9 +583,65 @@ struct ExprVisitor {
     }
 };
 
+enum class StmtType {
+    Assign,
+    Incr,
+};
 struct Stmt {
+    StmtType type;
     string lhs;
     Expr *rhs;
+
+    Stmt(StmtType type, string lhs, Expr *rhs) : type(type),
+        lhs(lhs), rhs(rhs) {};
+
+    string to_str() {
+
+        string eqname = "";
+        switch(type) {
+            case StmtType::Assign: eqname = ":="; break;
+            case StmtType::Incr: eqname = "+="; break;
+        }
+        return "(" + lhs + " " + eqname + " " +
+            rhs->detailed_to_str() + ")";
+    }
+};
+
+struct Program {
+    list<Stmt> stmts;
+
+    void assign(Expr *earr, Expr *rhs) {
+        Arr *arr = dynamic_cast<Arr*>(earr);
+        assert(arr != nullptr && "creating an array");
+
+        for(Stmt &s : stmts) {
+            assert(s.lhs != arr->name && "reusing arrays not allowed (SSA)");
+        }
+
+        stmts.push_back(Stmt(StmtType::Assign, arr->name, rhs));
+    }
+
+    void incr(Expr *earr, Expr *rhs) {
+        Arr *arr = dynamic_cast<Arr*>(earr);
+        assert(arr != nullptr && "creating an array");
+
+        stmts.push_back(Stmt(StmtType::Incr, arr->name, rhs));
+    }
+
+    string to_str() {
+        string str = "";
+        for (Stmt s: stmts) {
+            str += s.to_str() + "\n";
+        }
+        return str;
+    }
+
+    Expr *&operator [](string arrname) {
+        for (Stmt &s : stmts) {
+            if (s.lhs == arrname) return s.rhs;
+        }
+        assert(false && "no such array present");
+    }
 };
 
 
@@ -806,28 +885,40 @@ Expr *constantFold(Expr *e) {
 }
 */
 
-Expr *simplify(Expr *e) {
+Expr *simplify(Expr *e, bool debug) {
     PushContractionInwardsVisitor pushv;
     ConstantFoldVisitor cfv;
     EliminateContractionVisitor ecv;
     FlattenVisitor fv;
     for(int i = 0; i < 5; ++i) {
-        cout << "--\n";
-        cout << i << "|"  << e->to_str() << "\n";
+        if (debug) {
+            cout << "--\n";
+            cout << i << "|"  << e->to_str() << "\n";
+        }
         e = pushv.visitExpr(e);
-        // e = pushContractionsInwards(e);
-        cout << i << "|PUSH|" << e->to_str() << "\n";
+        if (debug) {
+            cout << i << "|PUSH|" << e->to_str() << "\n";
+        }
         e = cfv.visitExpr(e);
-        cout << i << "|FOLD|" << e->to_str() << "\n";
+        if (debug) {
+            cout << i << "|FOLD|" << e->to_str() << "\n";
+        }
         e = ecv.visitExpr(e);
-        cout << i << "|ELIM|" << e->to_str() << "\n";
+        if (debug) {
+            cout << i << "|ELIM|" << e->to_str() << "\n";
+        }
         e = fv.visitExpr(e);
-        cout << i << "|FLAT|" << e->to_str() << "\n";
-        // e = reassocDelta(e);
-        // cout << i << "|REASSOC|" << e->to_str() << "\n";
+        if (debug) {
+            cout << i << "|FLAT|" << e->to_str() << "\n";
+        }
     }
     return e;
 }
+
+
+Expr *Expr::normalize() {
+    return simplify(this, false);
+};
 
 void add_word_to_vocab(string w) {
     if (vocab.find(w) != vocab.end()) { return; }
@@ -901,7 +992,7 @@ void test_expr_dot() {
     Index k("k");
     Expr *grad = dot->grad("a", {k});
     cout << "## dot->grad[a k]: ##\n\t" << grad->detailed_to_str() << "\n";
-    simplify(grad);
+    simplify(grad, true);
 }
 
 // contract over all free indeces
@@ -929,11 +1020,11 @@ void test_expr_matvec() {
     Expr *grada = contractOverFree(matvec)->grad("a", 
             {Index("k"), Index("l")});
     cout << "## mul->grad[a k l]: ##\n\t" << grada->to_str() << "\n";
-    simplify(grada);
+    simplify(grada, true);
 
     Expr *gradb = contractOverFree(matvec)->grad("b", {Index("k")});
     cout << "## mul->grad[b k]: ##\n\t" << gradb->to_str() << "\n";
-    simplify(gradb);
+    simplify(gradb, true);
 }
 
 void test_expr_tanh() {
@@ -951,12 +1042,33 @@ void test_expr_tanh() {
     Expr *grada = contractOverFree(matvec)->grad("a", 
             {Index("k"), Index("l")});
     cout << "## mul->grad[a k l]: ##\n\t" << grada->to_str() << "\n";
-    simplify(grada);
+    simplify(grada, true);
 
     // Expr *gradb = contractOverFree(matvec)->grad("b", {Index("k")});
     // cout << "## mul->grad[b k]: ##\n\t" << gradb->to_str() << "\n";
     // simplify(gradb);
 
+}
+
+void test_program_dot() {
+    Program p;
+    Expr *a = new Arr("a");
+    Expr *b = new Arr("b");
+    Expr *grada = new Arr("grada");
+    Expr *gradb = new Arr("gradb");
+    Expr *dot = new Arr("dot");
+    Index i("i"), k("k");
+    p.assign(dot, new Contract(i, new Mul(a->ix(i), b->ix(i))));
+    p.assign(grada, new Mul(new ConstantFloat(1e-2),
+                p["dot"]->grad("a", {k})->normalize()));
+    p.assign(gradb, new Mul(new ConstantFloat(1e-2),
+                p["dot"]->grad("b", {k})->normalize()));
+
+    p.incr(a, grada);
+    p.incr(b, gradb);
+
+    cout << "***program dot**\n";
+    cout << p.to_str();
 }
 
 
@@ -998,5 +1110,6 @@ int main(int argc, char **argv) {
     test_expr_dot();
     test_expr_matvec();
     test_expr_tanh();
+    test_program_dot();
     // test_expr_rnn_batched();
 }
