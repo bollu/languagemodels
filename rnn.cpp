@@ -601,10 +601,10 @@ enum class StmtType {
 };
 struct Stmt {
     StmtType type;
-    string lhs;
+    Arr *lhs;
     Expr *rhs;
 
-    Stmt(StmtType type, string lhs, Expr *rhs) : type(type),
+    Stmt(StmtType type, Arr *lhs, Expr *rhs) : type(type),
         lhs(lhs), rhs(rhs) {};
 
     string to_str() {
@@ -614,7 +614,7 @@ struct Stmt {
             case StmtType::Assign: eqname = ":="; break;
             case StmtType::Incr: eqname = "+="; break;
         }
-        return "(" + lhs + " " + eqname + " " +
+        return "(" + lhs->to_str() + " " + eqname + " " +
             rhs->detailed_to_str() + ")";
     }
 };
@@ -622,22 +622,19 @@ struct Stmt {
 struct Program {
     list<Stmt> stmts;
 
-    void assign(Expr *earr, Expr *rhs) {
-        Arr *arr = dynamic_cast<Arr*>(earr);
-        assert(arr != nullptr && "creating an array");
-
+    void assign(Arr *arr, Expr *rhs) {
         for(Stmt &s : stmts) {
-            assert(s.lhs != arr->name && "reusing arrays not allowed (SSA)");
+            assert(s.lhs != arr && "Reusing arrays not allowed (SSA)");
+            assert(s.lhs->name != arr->name && "Different array objects with the same name are not allowed (SSA)");
         }
 
-        stmts.push_back(Stmt(StmtType::Assign, arr->name, rhs));
+        stmts.push_back(Stmt(StmtType::Assign, arr, rhs));
     }
 
-    void incr(Expr *earr, Expr *rhs) {
-        Arr *arr = dynamic_cast<Arr*>(earr);
+    void incr(Arr *arr, Expr *rhs) {
         assert(arr != nullptr && "creating an array");
 
-        stmts.push_back(Stmt(StmtType::Incr, arr->name, rhs));
+        stmts.push_back(Stmt(StmtType::Incr, arr, rhs));
     }
 
     string to_str() {
@@ -648,9 +645,9 @@ struct Program {
         return str;
     }
 
-    Expr *&operator [](string arrname) {
+    Expr *&operator [](Arr *arr) {
         for (Stmt &s : stmts) {
-            if (s.lhs == arrname) return s.rhs;
+            if (s.lhs == arr) return s.rhs;
         }
         assert(false && "no such array present");
     }
@@ -1078,9 +1075,9 @@ void test_program_dot() {
     Index i("i"), k("k");
     p.assign(dot, new Contract(i, new Mul(a->ix(i), b->ix(i))));
     p.assign(grada, new Mul(new ConstantFloat(1e-2),
-                p["dot"]->grad("a", {k})->normalize()));
+                p[dot]->grad("a", {k})->normalize()));
     p.assign(gradb, new Mul(new ConstantFloat(1e-2),
-                p["dot"]->grad("b", {k})->normalize()));
+                p[dot]->grad("b", {k})->normalize()));
 
     p.incr(a, grada);
     p.incr(b, gradb);
