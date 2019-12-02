@@ -322,55 +322,105 @@ struct Arr : public Expr {
 
 
 struct Add : public Expr {
-    Expr *l, *r;
+    vector<Expr*>inner;
 
-    Add (Expr *l, Expr *r) : Expr(ExprType::Add), l(l), r(r) {};
+    Add(vector<Expr *> inner) : 
+        Expr(ExprType::Add), inner(inner) {};
+
+    Add (Expr *l, Expr *r) : Expr(ExprType::Add) {
+        inner.push_back(l);
+        inner.push_back(r);
+
+    }
 
     string to_str() const {
-        return "(+ " + l->to_str() + " " + r->to_str() + ")";
+        string s = "(+ ";
+
+        for(int i = 0; i < (int)inner.size(); ++i) {
+            s += inner[i]->to_str() + 
+                (i < (int)inner.size() - 1 ? " " : "");
+        }
+        s += ")";
+        return s;
     }
 
     set<Index> free() const {
-        set<Index> lf = l->free();
-        set<Index> rf = l->free();
-        rf.insert(lf.begin(), lf.end());
-        return rf;
+        set<Index> f;
+
+        for(Expr *i: inner) {
+            set<Index> ifree = i->free();
+            f.insert(ifree.begin(), ifree.end());
+        }
+        return f;
     }
 
     Expr *grad(string name, vector<Index> ixs) {
-        return new Add(l->grad(name, ixs), r->grad(name, ixs));
+        vector<Expr *>dinner;
+        for(Expr *e : inner) {
+            dinner.push_back(e->grad(name, ixs));
+        }
+        return new Add(dinner);
     }
 
     Expr *subst(Index old, Index new_) const {
-        return new Add(l->subst(old, new_),
-                r->subst(old, new_));
+        vector<Expr *> sinner;
+        for(Expr *e : inner) {
+            sinner.push_back(e->subst(old, new_));
+        }
+        return new Add(sinner);
     }
 };
 
 struct Mul : public Expr {
-    Expr *l, *r;
+    vector<Expr *>inner;
+   
+    Mul (Expr *l, Expr *r) : Expr(ExprType::Mul) {
+        inner.push_back(l);
+        inner.push_back(r);
+    }
 
-    Mul (Expr *l, Expr *r) : Expr(ExprType::Mul), l(l), r(r) {};
+    Mul(vector<Expr *> inner) : Expr(ExprType::Mul), inner(inner) {};
 
     string to_str() const {
-        return "(* " + l->to_str() + " " + r->to_str() + ")";
+        string s =  "(* ";
+        for(int i = 0; i < (int)inner.size(); ++i) {
+            s += inner[i]->to_str();
+            s += (i < (int)inner.size() - 1 ? " " : "");
+        }
+        return s;
     }
 
     set<Index> free() const {
-        set<Index> lf = l->free();
-        set<Index> rf = l->free();
-        rf.insert(lf.begin(), lf.end());
-        return rf;
+        set<Index> f;
+
+        for(Expr *i: inner) {
+            set<Index> ifree = i->free();
+            f.insert(ifree.begin(), ifree.end());
+        }
+        return f;
     }
 
     Expr *grad(string name, vector<Index> ixs) {
-        return new Add(new Mul(l->grad(name, ixs), r),
-                    new Mul(l, r->grad(name, ixs)));
+
+        // d(fgh) = df gh + f dg h + fg dh
+        vector<Expr *> dsum;
+
+        for(int i = 0; i < (int)inner.size(); ++i) {
+            vector<Expr *> dinner_i = inner;
+            dinner_i[i] = dinner_i[i]->grad(name, ixs);
+
+            dsum.push_back(new Mul(dinner_i));
+        }
+
+        return new Add(dsum);
     }
 
     Expr *subst(Index old, Index new_) const {
-        return new Mul(l->subst(old, new_),
-                r->subst(old, new_));
+        vector<Expr *> sinner;
+        for(Expr *e : inner) {
+            sinner.push_back(e->subst(old, new_));
+        }
+        return new Mul(sinner);
     }
 };
 
@@ -479,29 +529,227 @@ Expr *Expr::contract(Index ix) {
     return new Contract(ix, this);
 }
 
+struct ExprVisitor {
+    Expr *visitExpr(Expr *e) {
+        if (Add *a = dynamic_cast<Add *>(e)) {
+            return visitAdd(a);
+        }
+        else if (Mul *m = dynamic_cast<Mul *>(e)) {
+            return visitMul(m);
+        }
+        else if (Contract *c = dynamic_cast<Contract *>(e)) {
+            return visitContract(c);
+        } 
+        else {
+            return e;
+        }
+
+        // assert(false && "unknown expr type!");
+
+    };
+
+    virtual Expr *visitMul(Mul *m) { 
+        vector<Expr *> inner;
+        for(Expr *e : m->inner) {
+            inner.push_back(visitExpr(e));
+        }
+        return new Mul(inner);
+    }
+
+    virtual Expr *visitAdd(Add *a) { 
+        vector<Expr *> inner;
+        for(Expr *e : a->inner) {
+            inner.push_back(visitExpr(e));
+        }
+        return new Add(inner);
+    };
+    virtual Expr *visitContract(Contract *c) { 
+        Expr *inner = visitExpr(c->inner);
+        return new Contract(c->ix, inner);
+    }
+};
+
 struct Stmt {
     string lhs;
     Expr *rhs;
 };
 
 
+// (>< (+ a b c)) = (+ (>< a) (>< b) (>< c))
+struct PushContractionInwardsVisitor : ExprVisitor {
+    virtual Expr* visitContract(Contract *c) {
+        Add *a = dynamic_cast<Add *>(c->inner);
+        if (!a) return c;
+
+        vector<Expr *> inner;
+        for(Expr *e : a->inner) {
+            inner.push_back(new Contract(c->ix, visitExpr(e)));
+        }
+        return new Add(inner);
+    }
+};
+
+
+bool is_const_zero(const Expr *e) {
+    const ConstantInt *i = dynamic_cast<const ConstantInt*>(e);
+    if (!i) return false;
+    return i->i == 0;
+}
+
+bool is_const_one(const Expr *e) {
+    const ConstantInt *i = dynamic_cast<const ConstantInt*>(e);
+    if (!i) return false;
+    return i->i == 1;
+}
+
+
+bool is_all_const_zero(const vector<Expr *> &elist) {
+    for(const Expr *e : elist) {
+        if (!is_const_zero(e)) return false;
+    }
+    return true;
+}
+
+
+bool is_any_const_zero(const vector<Expr *> &elist) {
+    for(const Expr *e : elist) {
+        if (is_const_zero(e)) return true;
+    }
+    return false;
+}
+
+struct ConstantFoldVisitor : ExprVisitor {
+    virtual Expr *visitMul(Mul *m) {
+
+        // constant fold multiplication with 0, remove multiplication
+        // with 1.
+        if (is_any_const_zero(m->inner)) { return new ConstantInt(0); }
+
+        vector<Expr *> inner;
+        for(Expr *e : m->inner) {
+            if(is_const_one(e)) continue;
+            inner.push_back(visitExpr(e));
+        }
+
+        if (inner.size() == 1) { return inner[0]; }
+
+        return new Mul(inner);
+    }
+
+    virtual Expr *visitAdd(Add *a) {
+        vector<Expr *> inner;
+        for(Expr *e : a->inner) {
+            if (is_const_zero(e)) continue;
+            inner.push_back(visitExpr(e));
+        }
+
+        if (inner.size() == 1) return inner[0];
+        return new Add(inner);
+    }
+
+    virtual Expr *visitContract(Contract *c) {
+        if (is_const_zero(c->inner)) return new ConstantInt(0);
+        return ExprVisitor::visitContract(c);
+    }
+};
+
+// return a Delta that is within es, which replaces the
+// the index ix. return -1 otherwise.
+int findDeltaForIndex(Index ix, vector<Expr *> es) {
+    for(int i = 0; i < (int)es.size(); ++i) {
+        Delta *d = dynamic_cast<Delta *>(es[i]);
+        if(d && d->old == ix) return i;
+    }
+    return -1;
+}
+
+// eliminate (>< i (* t1 t2 (δ i->j) t3)) with 
+//     (* t1[i->j] t2[i->j] t3[i->j])
+struct EliminateContractionVisitor : public ExprVisitor {
+    virtual Expr *visitContract(Contract *c) {
+        Mul *m = dynamic_cast<Mul *>(c->inner);
+        if (!m) { 
+            return new Contract(c->ix, ExprVisitor::visitExpr(c->inner));
+        };
+
+        vector<Expr *> subst;
+        const int deltaix = findDeltaForIndex(c->ix, m->inner);
+        if (deltaix == -1) { 
+            return new Contract(c->ix, ExprVisitor::visitExpr(c->inner));
+        }
+
+        const Delta *d = dynamic_cast<Delta *>(m->inner[deltaix]);
+        assert(d && "output from findDeltaForIndex should be Delta");
+
+        // success
+        vector<Expr *> substInner;
+        for(Expr *e : m->inner) {
+            if (e == d) continue;
+            substInner.push_back(ExprVisitor::visitExpr(e->subst(c->ix,
+                            d->new_)));
+        }
+        return new Mul(substInner);
+    };
+};
+
+
 Expr *pushContractionsInwards(Expr *e) {
     if (Add *a = dynamic_cast<Add *>(e)) {
-        return new Add(pushContractionsInwards(a->l),
-                pushContractionsInwards(a->r));
+        vector<Expr *> inner;
+        for(Expr *e : a->inner) inner.push_back(pushContractionsInwards(e));
+        return new Add(inner);
     }
+    if (Mul *m = dynamic_cast<Mul *>(e)) {
+        vector<Expr *> inner;
+        for(Expr *e : m->inner) inner.push_back(pushContractionsInwards(e));
+        return new Mul(inner);
+    }
+    // (>< (+ a b c)) = (+ (>< a) (>< b) (>< c))
     else if (Contract *c = dynamic_cast<Contract *>(e)) {
         Add *a = dynamic_cast<Add *>(c->inner);
-        if (!a) return e;
-        Expr *l = new Contract(c->ix, a->l);
-        Expr *r = new Contract(c->ix, a->r);
-        return new Add(l, r);
+        vector<Expr *> inner;
+        for(Expr *e : a->inner) {
+            inner.push_back(new Contract(c->ix, pushContractionsInwards(e)));
+        }
+        return new Add(inner);
 
     }
     return e;
 }
 
+// convert (+ (+ a b) (+ c d)) to (+ a b c d) and similary
+// for multiplication
+struct FlattenVisitor : public ExprVisitor {
+    virtual Expr *visitMul(Mul *m) {
+        vector<Expr *> inner;
+        for(Expr *e : m->inner) {
+            Mul *me = dynamic_cast<Mul *>(e);
+            if (!me) { inner.push_back(e); }
+            else {
+                // copy everything from the inner multiplication
+                inner.insert(inner.end(), me->inner.begin(), me->inner.end());
+            }
+        }
+        return new Mul(inner);
+    }
+
+    virtual Expr *visitAdd(Add *a) {
+        vector<Expr *> inner;
+        for(Expr *e : a->inner) {
+            Add *ae = dynamic_cast<Add *>(e);
+            if (!ae) { inner.push_back(e); }
+            else {
+                // copy everything from the inner multiplication
+                inner.insert(inner.end(), ae->inner.begin(), ae->inner.end());
+            }
+        }
+        return new Add(inner);
+    }
+};
+
+
 // move dirac deltas leftwards
+/*
 Expr *reassocDelta(Expr *e) {
     if (Add *a = dynamic_cast<Add *>(e)) {
         return new Add(reassocDelta(a->l), reassocDelta(a->r));
@@ -538,20 +786,10 @@ Expr *eliminateContractions(Expr *e)  {
 
     return e;
 };
+*/
 
 
-bool is_const_zero(Expr *e) {
-    ConstantInt *i = dynamic_cast<ConstantInt*>(e);
-    if (!i) return false;
-    return i->i == 0;
-}
-
-bool is_const_one(Expr *e) {
-    ConstantInt *i = dynamic_cast<ConstantInt*>(e);
-    if (!i) return false;
-    return i->i == 1;
-}
-
+/*
 Expr *constantFold(Expr *e) {
     if (Mul *m = dynamic_cast<Mul*>(e)) {
         if (is_const_zero(m->l)) return new ConstantInt(0);
@@ -575,19 +813,27 @@ Expr *constantFold(Expr *e) {
 
     return e;
 }
+*/
 
 Expr *simplify(Expr *e) {
+    PushContractionInwardsVisitor pushv;
+    ConstantFoldVisitor cfv;
+    EliminateContractionVisitor ecv;
+    FlattenVisitor fv;
     for(int i = 0; i < 5; ++i) {
         cout << "--\n";
         cout << i << "|"  << e->to_str() << "\n";
-        e = pushContractionsInwards(e);
+        e = pushv.visitExpr(e);
+        // e = pushContractionsInwards(e);
         cout << i << "|PUSH|" << e->to_str() << "\n";
-        e = constantFold(e);
+        e = cfv.visitExpr(e);
         cout << i << "|FOLD|" << e->to_str() << "\n";
-        e = eliminateContractions(e);
+        e = ecv.visitExpr(e);
         cout << i << "|ELIM|" << e->to_str() << "\n";
-        e = reassocDelta(e);
-        cout << i << "|REASSOC|" << e->to_str() << "\n";
+        e = fv.visitExpr(e);
+        cout << i << "|FLAT|" << e->to_str() << "\n";
+        // e = reassocDelta(e);
+        // cout << i << "|REASSOC|" << e->to_str() << "\n";
     }
     return e;
 }
@@ -663,8 +909,17 @@ void test_expr_dot() {
     cout << dot->detailed_to_str() << "\n";
     Index k("k");
     Expr *grad = dot->grad("a", {k});
-    cout << "dot->grad[a k]: " << grad->detailed_to_str() << "\n";
+    cout << "## dot->grad[a k]: ##\n\t" << grad->detailed_to_str() << "\n";
     simplify(grad);
+}
+
+// contract over all free indeces
+Expr* contractOverFree(Expr *e) {
+    set<Index> free = e->free();
+    for(Index ix : free) {
+        e = new Contract(ix, e);
+    }
+    return e;
 }
 
 void test_expr_matvec() {
@@ -677,12 +932,16 @@ void test_expr_matvec() {
     cout << "***mul***\n";
     cout << matvec->detailed_to_str() << "\n";
 
-    Expr *grada = matvec->grad("a", {Index("k"), Index("l")});
-    cout << "mul->grad[a k l]: " << grada->to_str() << "\n";
+
+    // before we can take the gradient, we need to put a sum over all
+    // free parameters
+    Expr *grada = contractOverFree(matvec)->grad("a", 
+            {Index("k"), Index("l")});
+    cout << "## mul->grad[a k l]: ##\n\t" << grada->to_str() << "\n";
     simplify(grada);
 
-    Expr *gradb = matvec->grad("b", {Index("k")});
-    cout << "mul->grab[b k]: " << gradb->to_str() << "\n";
+    Expr *gradb = contractOverFree(matvec)->grad("b", {Index("k")});
+    cout << "## mul->grad[b k]: ##\n\t" << gradb->to_str() << "\n";
     simplify(gradb);
 }
 
