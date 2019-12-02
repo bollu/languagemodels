@@ -161,10 +161,6 @@ struct Expr {
     ExprType ty = ExprType::Undef;
     Expr(ExprType ty): ty(ty) {};
 
-    Expr *ix(vector<Index> ix);
-    Expr *ix(Index ix1);
-    Expr *ix(Index ix, Index ix2);
-
     Expr *contract(Index ix);
 
     // print as string
@@ -178,9 +174,6 @@ struct Expr {
 
     // creates dirac deltas by taking gradients
     virtual Expr *grad(string name, vector<Index> ixs) = 0;
-
-    // derive the shape of the array
-    virtual Shape shape() const = 0;
 
     string detailed_to_str() const {
         string s = "";
@@ -197,19 +190,6 @@ struct Expr {
 };
 
 
-bool doesShapeUnify(Expr *e1, Expr *e2) {
-    Shape sh1 = e1->shape();
-    Shape sh2 = e2->shape();
-
-    if (sh1 == sh2) return true;
-
-    cerr << "cannot unify shapes: "
-        << "(" << sh1.to_str() << ", " << sh2.to_str() << ")"
-        << "\n\t" << e1->to_str() 
-        << "\n\t" << e2->to_str();
-    return false;
-}
-
 struct ConstantInt : public Expr {
     int i;
     ConstantInt(int i) : Expr(ExprType::ConstantInt), i(i) {};
@@ -223,8 +203,6 @@ struct ConstantInt : public Expr {
     Expr *subst(Index old, Index new_) const {
         return new ConstantInt(i);
     }
-
-    Shape shape() const { return Shape::zerod(); }
 
 };
 
@@ -242,8 +220,6 @@ struct ConstantFloat : public Expr {
         return new ConstantFloat(f);
     }
 
-
-    Shape shape() const { return Shape::zerod(); }
 };
 
 
@@ -282,8 +258,6 @@ struct Delta : public Expr {
                     new_ == sold ? snew : new_);
     }
 
-    Shape shape() const { return Shape::zerod(); }
-
 
 };
 
@@ -320,6 +294,11 @@ struct Arr : public Expr {
 
     Shape shape() const { return sh; }
 
+    // helpers to index
+    Expr *ix(vector<Index> ix);
+    Expr *ix(Index ix1);
+    Expr *ix(Index ix, Index ix2);
+
 
 };
 
@@ -330,17 +309,9 @@ struct Add : public Expr {
     Add(vector<Expr *> inner) : 
         Expr(ExprType::Add), inner(inner) {
             assert(inner.size() >= 1);
-            Expr *esh = inner[0];
-
-            for(Expr *e : inner) {
-                assert(doesShapeUnify(esh, e));
-                esh = e;
-            }
         };
 
     Add (Expr *l, Expr *r) : Expr(ExprType::Add) {
-
-        assert(doesShapeUnify(l, r));
         inner.push_back(l);
         inner.push_back(r);
 
@@ -382,10 +353,6 @@ struct Add : public Expr {
         }
         return new Add(sinner);
     }
-
-    Shape shape() const {
-        return inner[0]->shape();
-    }
 };
 
 
@@ -393,17 +360,12 @@ struct Mul : public Expr {
     vector<Expr *>inner;
    
     Mul (Expr *l, Expr *r) : Expr(ExprType::Mul) {
-        assert(doesShapeUnify(l, r));
         inner.push_back(l);
         inner.push_back(r);
     }
 
     Mul(vector<Expr *> inner) : Expr(ExprType::Mul), inner(inner) {
-        Expr *esh = inner[0];
-
-        for(Expr *e : inner) {
-            assert(doesShapeUnify(esh, e));
-        }
+        assert(inner.size() >= 1);
     };
 
     string to_str() const {
@@ -447,10 +409,6 @@ struct Mul : public Expr {
         }
         return new Mul(sinner);
     }
-
-    Shape shape() const {
-        return inner[0]->shape();
-    }
 };
 
 Expr *exprNegate(Expr *e) {
@@ -462,13 +420,12 @@ Expr *exprsub(Expr *l, Expr *r) {
 }
 
 struct Slice : public Expr {
-    Expr *inner;
+    Arr *arr;
     vector<Index> ixs;
 
-    Slice(Expr *inner, vector<Index> ixs): 
-        Expr(ExprType::Slice), inner(inner), ixs(ixs) {
-            Arr *arr = dynamic_cast<Arr *>(inner);
-            assert(arr && "cannot find array inside slice");
+    Slice(Arr *arr, vector<Index> ixs): 
+        Expr(ExprType::Slice), arr(arr), ixs(ixs) {
+            assert(arr && "must only slice arrays");
             // ensure that we are fully indexing the array.
             if(arr->shape().ndim != (int)ixs.size()) {
                 cout << "array " << arr->to_str() << "| shape: " 
@@ -480,7 +437,7 @@ struct Slice : public Expr {
         }; 
 
     string to_str() const  {
-        string s =  "(! " + inner->to_str() + " ";
+        string s =  "(! " + arr->to_str() + " ";
 
         for(int i = 0; i < (int)ixs.size(); ++i) {
             s += ixs[i].to_str() + (i < (int)ixs.size() - 1 ? " " : "");
@@ -491,23 +448,18 @@ struct Slice : public Expr {
     }
 
     set<Index> free() const {
-        set<Index> s = inner->free();
+        set<Index> s = arr->free();
         for (Index ix :ixs) { s.insert(ix); };
         return s;
     }
 
     Expr *grad(string name, vector<Index> gixs) {
-        // we are a slice of an expression, allow the inner part
-        // to continue uninhibited
-        Arr *a = dynamic_cast<Arr *>(inner);
-        if (!a) { return new Slice(inner->grad(name, gixs), ixs); }
-
         // this IS the slice of an array, but not the array we are
         // looking for. Return zero
-        if(name != a->name) { return new ConstantInt(0); }
+        if(name != arr->name) { return new ConstantInt(0); }
 
         // we ARE the slce of the array we were looking for.
-        assert(name == a->name);
+        assert(name == arr->name);
 
         assert(gixs.size() >= 1);
         assert(gixs.size() == ixs.size());
@@ -526,23 +478,21 @@ struct Slice : public Expr {
         for(int i = 0; i < (int)ixs.size(); ++i) {
             ixsnew.push_back(ixs[i] == old ? new_ : ixs[i]);
         }
-        return new Slice(inner, ixsnew);
+        return new Slice(arr, ixsnew);
     }
-
-    Shape shape() const { return Shape::zerod(); }
 
 };
 
 
-Expr *Expr::ix(vector<Index> ixs) {
+Expr *Arr::ix(vector<Index> ixs) {
     return new Slice(this, ixs);
 }
 
-Expr *Expr::ix(Index ix1) {
+Expr *Arr::ix(Index ix1) {
     return new Slice(this, {ix1});
 }
 
-Expr *Expr::ix(Index ix1, Index ix2) {
+Expr *Arr::ix(Index ix1, Index ix2) {
     return new Slice(this, {ix1, ix2});
 }
 
@@ -570,10 +520,6 @@ struct Contract : public Expr {
 
     Expr *subst(Index old, Index new_) const {
         return new Contract(ix == old ? new_ : ix, inner);
-    }
-
-    Shape shape() const { 
-         return Shape::zerod();
     }
 
 };
@@ -606,12 +552,6 @@ struct Tanh : public Expr {
         Expr *dinner = inner->grad(name, ixs);
         return new Mul(dtan, dinner);
     }
-
-    Shape shape() const { 
-         return inner->shape();
-    }
-
-
 
 };
 
@@ -1054,8 +994,8 @@ vector<int> parse_sentence(FILE *f) {
 
 void test_expr_dot() {
     int NDIMS = 3;
-    Expr *a = new Arr("a", NDIMS);
-    Expr *b = new Arr("b", NDIMS);
+    Arr *a = new Arr("a", NDIMS);
+    Arr *b = new Arr("b", NDIMS);
     Index i("i");
     Expr *mul = new Mul(a->ix(i), b->ix(i));
     Expr *dot = new Contract(i, mul);
@@ -1080,8 +1020,8 @@ Expr* contractOverFree(Expr *e) {
 void test_expr_matvec() {
     const int NOUT = 3;
     const int NIN = 3;
-    Expr *a = new Arr("a", NOUT, NIN);
-    Expr *b = new Arr("b", NIN);
+    Arr *a = new Arr("a", NOUT, NIN);
+    Arr *b = new Arr("b", NIN);
     Index i("i"), j("j");
     Expr *mul = new Mul(a->ix(i, j), b->ix(j));
     Expr *matvec = new Contract(j, mul);
@@ -1104,7 +1044,7 @@ void test_expr_matvec() {
 
 void test_expr_tanh() {
     const int NDIM = 3;
-    Expr *a = new Arr("a", NDIM, NDIM);
+    Arr *a = new Arr("a", NDIM, NDIM);
     Index i("i"), j("j");
     Expr *aixed = a->ix(i, j);
     Expr *matvec = new Tanh(aixed);
@@ -1130,11 +1070,11 @@ void test_program_dot() {
     Program p;
 
     static const int ARRSIZE = 10;
-    Expr *a = new Arr("a", ARRSIZE);
-    Expr *b = new Arr("b", ARRSIZE);
-    Expr *grada = new Arr("grada", ARRSIZE);
-    Expr *gradb = new Arr("gradb", ARRSIZE);
-    Expr *dot = new Arr("dot");
+    Arr *a = new Arr("a", ARRSIZE);
+    Arr *b = new Arr("b", ARRSIZE);
+    Arr *grada = new Arr("grada", ARRSIZE);
+    Arr *gradb = new Arr("gradb", ARRSIZE);
+    Arr *dot = new Arr("dot");
     Index i("i"), k("k");
     p.assign(dot, new Contract(i, new Mul(a->ix(i), b->ix(i))));
     p.assign(grada, new Mul(new ConstantFloat(1e-2),
