@@ -503,20 +503,37 @@ Expr *pushContractionsInwards(Expr *e) {
 
 // move dirac deltas leftwards
 Expr *reassocDelta(Expr *e) {
+    if (Add *a = dynamic_cast<Add *>(e)) {
+        return new Add(reassocDelta(a->l), reassocDelta(a->r));
+    } else if (Mul *m = dynamic_cast<Mul *>(e)) {
+        if (Delta *dr = dynamic_cast<Delta *>(m->r)) {
+            return new Mul(dr, reassocDelta(m->l));
+        } else {
+            return new Mul(reassocDelta(m->l), reassocDelta(m->r));
+        }
+    } else if (Contract *c = dynamic_cast<Contract *>(e)) {
+        return new Contract(c->ix, reassocDelta(c->inner));
+    }
     return e;
 }
 
 // eliminate (>< i (* (δ i->j) t1)) with t1[i/j]
 Expr *eliminateContractions(Expr *e)  {
-    Contract *c = dynamic_cast<Contract *>(e);
-    if (!c) return e;
-    Mul *m = dynamic_cast<Mul *>(c->inner);
-    if (!m) return e;
-    Delta *d = dynamic_cast<Delta *>(m->l);
-    if (!d) return e;
+    if (Add *a = dynamic_cast<Add *>(e)) {
+        return new Add(eliminateContractions(a->l), eliminateContractions(a->r));
+    }
+    else if (Mul *m = dynamic_cast<Mul *>(e)) {
+        return new Mul(eliminateContractions(m->l), eliminateContractions(m->r));
+    } else if (Contract *c = dynamic_cast<Contract *>(e)) {
+        if (!c) return e;
+        Mul *m = dynamic_cast<Mul *>(c->inner);
+        if (!m) return e;
+        Delta *d = dynamic_cast<Delta *>(m->l);
+        if (!d) return e;
 
-    if (c->ix == d->old) {
-        return m->r->subst(d->old, d->new_);
+        if (c->ix == d->old) {
+            return m->r->subst(d->old, d->new_);
+        }
     }
 
     return e;
@@ -560,7 +577,7 @@ Expr *constantFold(Expr *e) {
 }
 
 Expr *simplify(Expr *e) {
-    for(int i = 0; i < 4; ++i) {
+    for(int i = 0; i < 5; ++i) {
         cout << "--\n";
         cout << i << "|"  << e->to_str() << "\n";
         e = pushContractionsInwards(e);
@@ -569,6 +586,8 @@ Expr *simplify(Expr *e) {
         cout << i << "|FOLD|" << e->to_str() << "\n";
         e = eliminateContractions(e);
         cout << i << "|ELIM|" << e->to_str() << "\n";
+        e = reassocDelta(e);
+        cout << i << "|REASSOC|" << e->to_str() << "\n";
     }
     return e;
 }
@@ -657,6 +676,14 @@ void test_expr_matvec() {
 
     cout << "***mul***\n";
     cout << matvec->detailed_to_str() << "\n";
+
+    Expr *grada = matvec->grad("a", {Index("k"), Index("l")});
+    cout << "mul->grad[a k l]: " << grada->to_str() << "\n";
+    simplify(grada);
+
+    Expr *gradb = matvec->grad("b", {Index("k")});
+    cout << "mul->grab[b k]: " << gradb->to_str() << "\n";
+    simplify(gradb);
 }
 
 
