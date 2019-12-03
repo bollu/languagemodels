@@ -7,6 +7,7 @@
 #include <stdio.h>
 #include <map>
 #include <list>
+#include <stack>
 #include <assert.h>
 #include <stdlib.h>
 #include <string.h>
@@ -594,6 +595,8 @@ struct ExprVisitor {
             return visitIndex(i);
         } else if (Arr *a = dynamic_cast<Arr *>(e)) {
             return visitArr(a);
+        } else if (Tanh *tanh = dynamic_cast<Tanh *>(e)) {
+            return visitExpr(tanh->inner);
         } else {
             return e;
         }
@@ -1001,7 +1004,7 @@ Expr *simplify(Expr *e, bool debug) {
     ConstantFoldVisitor cfv;
     EliminateContractionVisitor ecv;
     FlattenVisitor fv;
-    for(int i = 0; i < 1; ++i) {
+    for(int i = 0; i < 100; ++i) {
         if (debug) {
             cout << "--\n";
             cout << i << "|"  << e->to_str() << "\n";
@@ -1363,14 +1366,16 @@ struct ArrayGatherVisitor : public ExprVisitor {
     }
 };
 
-// take the derivatives of this expression with all arrays
-// that occur within it.
-void takeDerivatives(Program &p, Expr *e, string name) {
+// take the derivatives of this expression with all arrays in "params"
+// that occur directly within it
+void takeDirectDerivatives(Program &p, Expr *e, string name, set<const Arr*> params) {
     ArrayGatherVisitor agv;
     agv.visitExpr(e);
 
     IRBuilder builder(p);
     for(Arr *a : agv.arrays) {
+        if (params.find(a) == params.end()) continue;
+
         vector<const Arr *> ixs;
         for (int i = 0; i < a->sh.ndim; ++i)
             ixs.push_back(new Arr("i" + to_string(i)));
@@ -1384,10 +1389,81 @@ void takeDerivatives(Program &p, Expr *e, string name) {
 
 }
 
+
+// get all paths from a source node to a target node, _backwards_. 
+// That is, expressions:
+// x1 := x0 + 1
+// x2 := x1 + 1
+// x3 := x2 + 3
+// with the call
+// getPathsToArr(p, x3, x0, {x3}) will give
+// - x3 x2 x1 x0
+set<std::vector<Arr *>> getPathsToArr(Program &p, Arr *cur, Arr *target, set<vector<Arr *>> pathsToCur) {
+    if (cur == target) {
+        return pathsToCur;
+    }
+
+    ArrayGatherVisitor agv;
+    Expr *rhs = p[cur];
+
+    cout << "rhs for " << cur->name << " : " << (rhs ? rhs->to_str() : "NULL") << "\n";
+    if (!rhs) { return {}; }
+
+    // look in the RHS of this array
+    agv.visitExpr(rhs);
+
+    cout << "arrays for |" << cur->name << "| := |"  << rhs->to_str() << "|";
+    for(Arr *a : agv.arrays) cout << a->name << " ";
+    cout << "|\n";
+
+    set<vector<Arr *>> ps;
+    for (Arr *child : agv.arrays) { 
+        set<vector<Arr *>> pathsToChild;
+        for (vector<Arr *> path: pathsToCur) {
+            path.push_back(child);
+            pathsToChild.insert(path);
+        }
+        set<vector<Arr *>> pathsToTarget = getPathsToArr(p, child, target, pathsToChild);
+        ps.insert(pathsToTarget.begin(), pathsToTarget.end());
+    }
+    return ps;
+}
+
+// compute dy/dx, through any chain of expressions needed.
+// TODO: keep a map of dy/dx -> array holding this value
+Expr* takeIndirectDerivatives(Program &p, Arr *y, Arr *x, map<pair<Arr *, Arr*>, Arr*> &ders) {
+    (void) ders;
+    IRBuilder builder(p);
+    set<vector<Arr *>> yTox = getPathsToArr(p, y, x, {{y}});
+
+    Expr *allsum = new ConstantInt(0);
+    for(vector<Arr *> path : yTox) {
+        // y3 -> y2 -> y1
+        // y3/y2 . y2/y1
+        Expr *chainprod = new ConstantInt(1);
+        for(int i = 0; i < (int)path.size() - 1; ++i) {
+
+            Expr *rhs = p[path[i]];
+            if (!rhs) continue;
+
+            vector<const Arr *> ixs;
+            for (int j = 0; j < path[i+1]->sh.ndim; ++j) {
+                ixs.push_back(new Arr("j" + to_string(j)));
+            }
+            Expr *der = rhs->grad(path[i+1]->name, ixs)->normalize();
+            Arr *arrder = new Arr("d" + path[i]->name + "_" + "d" + path[i+1]->name);
+            builder.copy(arrder, der);
+            chainprod = new Mul(chainprod, arrder);
+        }
+        allsum = new Add(allsum, chainprod);
+    }
+    return allsum;
+}
+
 void test_lstm() {
     static const int EMBEDSIZE = 5;
     static const int HIDDENSIZE = 10;
-    static const int NINPUTS = 1;
+    static const int NINPUTS = 2;
 
     Arr *inputs[NINPUTS];
     Arr *hiddens[NINPUTS+1];
@@ -1430,8 +1506,27 @@ void test_lstm() {
 
     cout << "\n\t|" << p[loss]->grad("H2H", {new Arr("i'"), new Arr("j'")})->normalize()->to_str_with_shape() << "|\n";
 
-    takeDerivatives(p, p[loss], "l");
+    takeDirectDerivatives(p, p[loss], "l", {predict});
 
+    cout << p.to_str();
+
+
+    cout << "\n\n paths from loss to H2H:\n";
+    set<vector<Arr *>> paths = getPathsToArr(p, loss, H2H, {{loss}});
+    for(vector<Arr *> path : paths) {
+        cout << "- ";
+        for(Arr *a : path) {
+            cout << a->name << " ";
+        }
+        cout << "\n";
+    }
+
+    map<pair<Arr *, Arr *>, Arr*> ders;
+    Expr *finalDer = takeIndirectDerivatives(p, loss, H2H, ders);
+    builder.copy(new Arr("dloss_dH2H"), finalDer->normalize());
+
+
+    cout << "*****LSTM(full)*****:\n";
     cout << p.to_str();
 }
 
