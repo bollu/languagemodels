@@ -206,7 +206,7 @@ struct Arr : public Expr {
     Arr(string name, int ix1, int ix2) : 
         Expr(ExprType::Arr), name(name), sh(Shape::twod(ix1, ix2)) {}
 
-    string to_str() const { return name + sh.to_str(); };
+    string to_str() const { return name + (sh.ndim > 0 ? sh.to_str() : ""); };
 
     set<const Arr *> free() const {
         return set<const Arr *>();
