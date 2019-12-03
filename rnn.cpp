@@ -447,7 +447,11 @@ struct SaturatedSlice : public Expr {
 
     SaturatedSlice(Arr *arr, vector<const Arr*> ixs): 
         Expr(ExprType::SaturatedSlice), arr(arr), ixs(ixs) {
-            assert(arr && "must only SaturatedSlice arrays");
+            for (const Arr *ix : ixs) {
+                assert(ix->shape().ndim == 0 &&
+                    "slices must be zero-dimensional");
+            }
+
             // ensure that we are fully indexing the array.
             if((int)ixs.size() > arr->shape().ndim) {
                 cout << "array " << arr->to_str() << "| shape: " 
@@ -455,9 +459,6 @@ struct SaturatedSlice : public Expr {
                     << "\n";
             };
             assert((int)ixs.size() <= arr->shape().ndim);
-
-            // TODO: assert that these are all zero dimensional arrays
-
         }; 
 
     string to_str() const  {
