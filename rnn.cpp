@@ -819,7 +819,7 @@ struct ConstantFoldVisitor : ExprVisitor {
         }
 
         if (inner.size() == 1) { return inner[0]; }
-
+        if (inner.size() == 0) { return new ConstantInt(1); }
         return new Mul(inner);
     }
 
@@ -831,7 +831,14 @@ struct ConstantFoldVisitor : ExprVisitor {
         }
 
         if (inner.size() == 1) return inner[0];
+        if (inner.size() == 0) { return new ConstantInt(0); }
+        
         return new Add(inner);
+    }
+
+     virtual Expr *visitSub(Sub *b) {
+        if(is_const_zero(b->r)) { return visitExpr(b->l); };
+        return ExprVisitor::visitSub(b);
     }
 
     virtual Expr *visitContract(Contract *c) {
@@ -1226,6 +1233,72 @@ void test_dot_indirect() {
     cout << p.to_str();
 }
 
+Expr *matvecmul(Arr *m, Arr *v, Arr *ix) {
+    Arr *c = new Arr("c");
+    return new Contract(c, new Mul(m->ix(ix, c), v->ix(c)));
+}
+
+Expr *l2(Arr *v, Arr *w) {
+    Arr *c = new Arr("c");
+    Expr *s = new Sub(v->ix(c), w->ix(c));
+    return new Contract(c, new Mul(s, s));    
+}
+
+Expr *cell(Arr *I2H, Arr *H2H, Arr *i, Arr *h, Arr *ix) {
+    return new Tanh(new Add(matvecmul(I2H, i, ix), matvecmul(H2H, h, ix)));
+}
+
+void test_lstm() {
+    static const int EMBEDSIZE = 5;
+    static const int HIDDENSIZE = 10;
+    static const int NINPUTS = 1;
+
+    Arr *inputs[NINPUTS];
+    Arr *hiddens[NINPUTS+1];
+
+    for(int i = 0; i < NINPUTS; ++i) {
+        inputs[i] = new Arr("i" + to_string(i), EMBEDSIZE);
+    }
+
+    (void)(inputs);
+
+    for(int i = 0; i < NINPUTS+1; ++i) {
+        hiddens[i] = new Arr("h" + to_string(i), EMBEDSIZE);
+    }
+
+    Arr *ix = new Arr("ix");
+
+    Arr *I2H = new Arr("I2H", EMBEDSIZE, HIDDENSIZE);
+    Arr *H2H = new Arr("H2H", HIDDENSIZE, HIDDENSIZE);
+    Arr *H2O = new Arr("H2O", HIDDENSIZE, EMBEDSIZE);
+
+    Program p;
+    IRBuilder builder(p);
+
+    Arr *hprev = hiddens[0];
+    for(int i = 0; i < NINPUTS; ++i) {
+        builder.copy(hiddens[i+1], cell(I2H, H2H, inputs[i], hprev, ix)); //new Tanh(matvecmul(H2H, hprev, ix)));
+        hprev = hiddens[i+1];
+    }
+
+    Arr *predict = new Arr("p", EMBEDSIZE);
+    builder.copy(predict, matvecmul(H2O, hprev, ix));
+
+
+    Arr *output = new Arr("o", EMBEDSIZE);
+    Arr *loss = new Arr("l");
+    builder.copy(loss, l2(predict, output));
+
+    cout << "*****LSTM*****:\n";
+    cout << p.to_str();
+
+    cout << "\n\t|" << p[loss]->grad("H2H", {new Arr("i'"), new Arr("j'")})->normalize()->to_str_with_shape() << "|";
+
+}
+
+
+
+
 int main(int argc, char **argv) {
     if (argc != 2) {
         cout << "usage: <input-path>\n";
@@ -1268,6 +1341,8 @@ int main(int argc, char **argv) {
     test_dot_batched();
     test_dot_indirect();
     test_dot_batched_indirect();
+
+    test_lstm();
 
     // test_expr_rnn_batched();
 }
