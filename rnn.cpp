@@ -98,11 +98,11 @@ struct Shape {
     }
 
     string to_str() const {
-        string s =  "sh[";
+        string s =  "<";
         for(int i = 0; i < ndim; ++i) {
             s += to_string(vals[i]) + (i < ndim - 1 ? " " : "");
         }
-        s += "]";
+        s += ">";
         return s;
     }
 
@@ -132,10 +132,12 @@ struct Shape {
 
 enum class ExprType {
     Add,
+    Sub,
     Mul,
     Undef,
     Arr,
-    Slice,
+    SaturatedSlice,
+    UnsaturatedSlice,
     Contract,
     Delta,
     ConstantInt,
@@ -154,7 +156,8 @@ struct Index {
     string to_str() const { return name; };
 };
 
-struct Slice;
+struct SaturatedSlice;
+struct UnsaturatedSlice;
 
 struct Expr {
     // gives type of expression
@@ -177,9 +180,9 @@ struct Expr {
 
     string detailed_to_str() const {
         string s = "";
-        s += "[[";
+        s += "[";
         for(Index i : free()) s += i.name + ",";
-        s += "]] ";
+        s += "] ";
         s += to_str();
         return s;
     }
@@ -274,7 +277,7 @@ struct Arr : public Expr {
     Arr(string name, int ix1, int ix2) : 
         Expr(ExprType::Arr), name(name), sh(Shape::twod(ix1, ix2)) {}
 
-    string to_str() const { return name + " " + sh.to_str(); };
+    string to_str() const { return name + sh.to_str(); };
 
     set<Index> free() const {
         return set<Index>();
@@ -298,6 +301,9 @@ struct Arr : public Expr {
     Expr *ix(vector<Index> ix);
     Expr *ix(Index ix1);
     Expr *ix(Index ix, Index ix2);
+
+    // helpers to take a SaturatedSlice
+    Expr *sliceArray(Index ix);
 
 
 };
@@ -355,6 +361,35 @@ struct Add : public Expr {
     }
 };
 
+struct Sub : public Expr {
+    Expr *l, *r;
+
+    Sub (Expr *l, Expr *r) : Expr(ExprType::Sub), l(l), r(r) { }
+
+    string to_str() const {
+        return "(- " + l->to_str() + " " + r->to_str() + ")";
+    }
+
+    set<Index> free() const {
+        set<Index> f;
+        set<Index> lf = l->free();
+        f.insert(lf.begin(), lf.end());
+
+        set<Index> rf = l->free();
+        f.insert(rf.begin(), rf.end());
+        return f;
+    }
+
+    Expr *grad(string name, vector<Index> ixs) {
+        return new Sub(l->grad(name, ixs), r->grad(name, ixs));
+    }
+
+    Expr *subst(Index old, Index new_) const {
+        return new Sub(l->subst(old, new_), r->subst(old, new_));
+    }
+};
+
+
 
 struct Mul : public Expr {
     vector<Expr *>inner;
@@ -411,21 +446,14 @@ struct Mul : public Expr {
     }
 };
 
-Expr *exprNegate(Expr *e) {
-    return new Mul(new ConstantInt(-1), e);
-};
 
-Expr *exprsub(Expr *l, Expr *r) {
-    return new Add(l, exprNegate(r));
-}
-
-struct Slice : public Expr {
+struct SaturatedSlice : public Expr {
     Arr *arr;
     vector<Index> ixs;
 
-    Slice(Arr *arr, vector<Index> ixs): 
-        Expr(ExprType::Slice), arr(arr), ixs(ixs) {
-            assert(arr && "must only slice arrays");
+    SaturatedSlice(Arr *arr, vector<Index> ixs): 
+        Expr(ExprType::SaturatedSlice), arr(arr), ixs(ixs) {
+            assert(arr && "must only SaturatedSlice arrays");
             // ensure that we are fully indexing the array.
             if(arr->shape().ndim != (int)ixs.size()) {
                 cout << "array " << arr->to_str() << "| shape: " 
@@ -437,13 +465,13 @@ struct Slice : public Expr {
         }; 
 
     string to_str() const  {
-        string s =  "(! " + arr->to_str() + " ";
+        string s =  arr->to_str() + "[";
 
         for(int i = 0; i < (int)ixs.size(); ++i) {
             s += ixs[i].to_str() + (i < (int)ixs.size() - 1 ? " " : "");
         }
 
-        s += ")";
+        s += "]";
         return s;
     }
 
@@ -454,7 +482,7 @@ struct Slice : public Expr {
     }
 
     Expr *grad(string name, vector<Index> gixs) {
-        // this IS the slice of an array, but not the array we are
+        // this IS the SaturatedSlice of an array, but not the array we are
         // looking for. Return zero
         if(name != arr->name) { return new ConstantInt(0); }
 
@@ -478,22 +506,90 @@ struct Slice : public Expr {
         for(int i = 0; i < (int)ixs.size(); ++i) {
             ixsnew.push_back(ixs[i] == old ? new_ : ixs[i]);
         }
-        return new Slice(arr, ixsnew);
+        return new SaturatedSlice(arr, ixsnew);
+    }
+
+};
+
+struct UnsaturatedSlice : public Expr {
+    Arr *arr;
+    vector<Index> ixs;
+
+    UnsaturatedSlice(Arr *arr, vector<Index> ixs): 
+        Expr(ExprType::UnsaturatedSlice), arr(arr), ixs(ixs) {
+            assert(arr && "must only UnsaturatedSlice arrays");
+            // ensure that we are fully indexing the array.
+            if(arr->shape().ndim < (int)ixs.size()) {
+                cout << "array " << arr->to_str() << "| shape: " 
+                    << arr->shape().to_str() << " | nixs: " << ixs.size()
+                    << "\n";
+            };
+            assert(arr->shape().ndim > (int)ixs.size());
+
+        }; 
+
+    string to_str() const  {
+        string s = arr->to_str() + "[";
+
+        for(int i = 0; i < (int)ixs.size(); ++i) {
+            s += ixs[i].to_str() + (i < (int)ixs.size() - 1 ? " " : "");
+        }
+
+        s += "]";
+        return s;
+    }
+
+    set<Index> free() const {
+        set<Index> s = arr->free();
+        for (Index ix :ixs) { s.insert(ix); };
+        return s;
+    }
+
+    Expr *grad(string name, vector<Index> gixs) {
+        // this IS the UnsaturatedSlice of an array, but not the array we are
+        // looking for. Return zero
+        if(name != arr->name) { return new ConstantInt(0); }
+
+        // we ARE the slce of the array we were looking for.
+        assert(name == arr->name);
+
+        assert(gixs.size() >= 1);
+        assert(gixs.size() == ixs.size());
+
+        // create deltas, one for each index of the array.
+        Expr *cur = new Delta(ixs[0], gixs[0]);
+        for(int i = 1; i < (int)ixs.size(); ++i) {
+            cur = new Mul(cur, new Delta(ixs[i], gixs[i]));
+        }
+        return cur;
+    }
+
+    // substitute old indeces for new indeces.
+    virtual Expr *subst(Index old, Index new_) const {
+        vector<Index> ixsnew;
+        for(int i = 0; i < (int)ixs.size(); ++i) {
+            ixsnew.push_back(ixs[i] == old ? new_ : ixs[i]);
+        }
+        return new SaturatedSlice(arr, ixsnew);
     }
 
 };
 
 
 Expr *Arr::ix(vector<Index> ixs) {
-    return new Slice(this, ixs);
+    return new SaturatedSlice(this, ixs);
 }
 
 Expr *Arr::ix(Index ix1) {
-    return new Slice(this, {ix1});
+    return new SaturatedSlice(this, {ix1});
 }
 
 Expr *Arr::ix(Index ix1, Index ix2) {
-    return new Slice(this, {ix1, ix2});
+    return new SaturatedSlice(this, {ix1, ix2});
+}
+
+Expr *Arr::sliceArray(Index ix1) {
+    return new UnsaturatedSlice(this, {ix1});
 }
 
 
@@ -547,7 +643,7 @@ struct Tanh : public Expr {
     }
 
     Expr *grad(string name, vector<Index> ixs) {
-        Expr *dtan = exprsub(new ConstantInt(1), new Mul(new Tanh(inner), new
+        Expr *dtan = new Sub(new ConstantInt(1), new Mul(new Tanh(inner), new
                     Tanh(inner)));
         Expr *dinner = inner->grad(name, ixs);
         return new Mul(dtan, dinner);
@@ -559,19 +655,15 @@ struct ExprVisitor {
     Expr *visitExpr(Expr *e) {
         if (Add *a = dynamic_cast<Add *>(e)) {
             return visitAdd(a);
-        }
-        else if (Mul *m = dynamic_cast<Mul *>(e)) {
+        } if (Sub *s = dynamic_cast<Sub *>(e)) {
+            return visitSub(s);
+        } else if (Mul *m = dynamic_cast<Mul *>(e)) {
             return visitMul(m);
-        }
-        else if (Contract *c = dynamic_cast<Contract *>(e)) {
+        } else if (Contract *c = dynamic_cast<Contract *>(e)) {
             return visitContract(c);
-        } 
-        else {
+        } else {
             return e;
         }
-
-        // assert(false && "unknown expr type!");
-
     };
 
     virtual Expr *visitMul(Mul *m) { 
@@ -589,68 +681,156 @@ struct ExprVisitor {
         }
         return new Add(inner);
     };
+
+    virtual Expr *visitSub(Sub *s) { 
+        return new Sub(visitExpr(s->l), visitExpr(s->r));
+    };
+
     virtual Expr *visitContract(Contract *c) { 
         Expr *inner = visitExpr(c->inner);
         return new Contract(c->ix, inner);
     }
 };
 
-enum class StmtType {
-    Assign,
+enum class AssignType {
+    Copy,
+    Reference,
     Incr,
 };
+
 struct Stmt {
-    StmtType type;
+    virtual string to_str(int depth=0) const = 0;
+
+    // return the RHS of the expression if the statement has it.
+    // return nullptr otherwise;
+    virtual void findArr(Arr *arr, Expr **arrptr)  = 0;
+};
+
+struct Assign : public Stmt {
+    AssignType type;
     Arr *lhs;
     Expr *rhs;
 
-    Stmt(StmtType type, Arr *lhs, Expr *rhs) : type(type),
-        lhs(lhs), rhs(rhs) {};
+    Assign(AssignType type, Arr *lhs, Expr *rhs) : type(type), lhs(lhs), rhs(rhs) {};
 
-    string to_str() {
+    string to_str(int depth) const {
 
         string eqname = "";
         switch(type) {
-            case StmtType::Assign: eqname = ":="; break;
-            case StmtType::Incr: eqname = "+="; break;
+            case AssignType::Copy: eqname = ":="; break;
+            case AssignType::Reference: eqname = "&="; break;
+            case AssignType::Incr: eqname = "+="; break;
         }
         return "(" + lhs->to_str() + " " + eqname + " " +
             rhs->detailed_to_str() + ")";
     }
+
+    virtual void findArr(Arr *arr, Expr **arrptr) {
+        assert(arrptr);
+        if (arr == lhs) {  *arrptr = rhs; }
+        else { *arrptr = nullptr; }
+    }
 };
 
-struct Program {
-    list<Stmt> stmts;
+struct Block : public Stmt {
+    list<Stmt *> stmts;
 
-    void assign(Arr *arr, Expr *rhs) {
-        for(Stmt &s : stmts) {
-            assert(s.lhs != arr && "Reusing arrays not allowed (SSA)");
-            assert(s.lhs->name != arr->name && "Different array objects with the same name are not allowed (SSA)");
-        }
-
-        stmts.push_back(Stmt(StmtType::Assign, arr, rhs));
-    }
-
-    void incr(Arr *arr, Expr *rhs) {
-        assert(arr != nullptr && "creating an array");
-
-        stmts.push_back(Stmt(StmtType::Incr, arr, rhs));
-    }
-
-    string to_str() {
+    string to_str(int depth) const {
         string str = "";
-        for (Stmt s: stmts) {
-            str += s.to_str() + "\n";
+        for (Stmt *s: stmts) {
+            str += string(depth, ' ') + s->to_str() + "\n";
         }
         return str;
     }
 
-    Expr *&operator [](Arr *arr) {
-        for (Stmt &s : stmts) {
-            if (s.lhs == arr) return s.rhs;
+    virtual void findArr(Arr *arr, Expr **arrptr) {
+        assert(arrptr);
+        *arrptr = nullptr;
+        for (auto it = stmts.rbegin(); it != stmts.rend(); ++it) {
+            (*it)->findArr(arr, arrptr);
+            if (*arrptr) { return; }
         }
-        assert(false && "no such array present");
     }
+
+
+};
+
+struct For : public Stmt {
+    Index ix;
+    Block inner;
+
+    For (Index ix) : ix(ix) {};
+
+    string to_str(int depth) const {
+        string s = "";
+        s += "for " + ix.name + " {\n";
+        s += inner.to_str(depth + 1);
+        s += "\n" + string(' ', depth) + "}";
+        return s;
+    }
+
+    virtual void findArr(Arr *arr, Expr **arrptr) {
+        return inner.findArr(arr, arrptr);
+    }
+};
+
+struct Program {
+    Block stmts;
+
+    string to_str() {
+        return stmts.to_str(0);
+    }
+
+    Expr *operator [](Arr *arr) {
+        Expr *arrptr;
+        stmts.findArr(arr, &arrptr);
+        return arrptr;
+    }
+
+};
+
+// welcome LLVM my old friend
+struct IRBuilder {
+    Program &p;
+    Block *insertPoint;
+
+    IRBuilder(Program &p) : p(p), insertPoint(&p.stmts) {};
+
+    void setInsertPoint(Program &p) {
+        insertPoint = &p.stmts;
+    }
+
+    void setInsertPoint(For &f) {
+        insertPoint = &f.inner;
+    }
+
+    void setInsertPoint(For *f) {
+        insertPoint = &f->inner;
+    }
+
+    void copy(Arr *arr, Expr *rhs) {
+        assert(arr != nullptr);
+        insertPoint->stmts.push_back(new Assign(AssignType::Copy, arr, rhs));
+    }
+
+    void incr(Arr *arr, Expr *rhs) {
+        assert(arr != nullptr && "creating an array");
+        insertPoint->stmts.push_back(new Assign(AssignType::Incr, arr, rhs));
+    }
+
+
+    void reference(Arr *arr, Expr *rhs) {
+        assert(arr != nullptr && "creating an array");
+        insertPoint->stmts.push_back(new Assign(AssignType::Reference, arr, rhs));
+    }
+
+    For *insertFor(Index ix) {
+        For *f = new For(ix);
+        insertPoint->stmts.push_back(f);
+        return f;
+    }
+
+
 };
 
 
@@ -972,8 +1152,10 @@ void test_expr_tanh() {
 
 }
 
+// construct Dot using program
 void test_program_dot() {
     Program p;
+    IRBuilder builder(p);
 
     static const int ARRSIZE = 10;
     Arr *a = new Arr("a", ARRSIZE);
@@ -982,16 +1164,54 @@ void test_program_dot() {
     Arr *gradb = new Arr("gradb", ARRSIZE);
     Arr *dot = new Arr("dot");
     Index i("i"), k("k");
-    p.assign(dot, new Contract(i, new Mul(a->ix(i), b->ix(i))));
-    p.assign(grada, new Mul(new ConstantFloat(1e-2),
+    builder.copy(dot, new Contract(i, new Mul(a->ix(i), b->ix(i))));
+    builder.copy(grada, 
+            new Mul(new ConstantFloat(1e-2), 
                 p[dot]->grad("a", {k})->normalize()));
-    p.assign(gradb, new Mul(new ConstantFloat(1e-2),
-                p[dot]->grad("b", {k})->normalize()));
+    builder.copy(gradb, 
+            new Mul(new ConstantFloat(1e-2),
+               p[dot]->grad("b", {k})->normalize()));
 
-    p.incr(a, grada);
-    p.incr(b, gradb);
+    builder.incr(a, grada);
+    builder.incr(b, gradb);
 
     cout << "***program dot**\n";
+    cout << p.to_str();
+}
+
+void test_dot_batched() {
+    cout << "*****program batched dot*****\n";
+    static const int BATCHSIZE = 10;
+    static const int EMBEDSIZE = 4;
+    Arr *focuses = new Arr("focuses", BATCHSIZE, EMBEDSIZE);
+    Arr *ctxes = new Arr("ctxes", BATCHSIZE, EMBEDSIZE);
+    Arr *focus = new Arr("focus", EMBEDSIZE);
+    Arr *ctx = new Arr("ctx", EMBEDSIZE);
+    Arr *dot = new Arr("dot");
+    Arr *loss = new Arr("loss");
+
+    Index bi("bi"), i("i");;
+    Program p;
+
+    IRBuilder builder(p);
+    // builder.setInsertPoint(builder.insertFor(bi));
+    For *forbi = builder.insertFor(bi);
+    builder.setInsertPoint(forbi);
+    
+
+    builder.reference(focus, focuses->sliceArray(bi));
+    builder.reference(ctx, ctxes->sliceArray(bi));
+
+    builder.copy(dot, new Contract(i, new Mul(focus->ix(i), ctx->ix(i))));
+    builder.copy(loss, new Sub(new ConstantInt(1), p[dot]));
+
+
+    Expr *lr = new ConstantFloat(1e-2);
+
+    builder.incr(focus, 
+        new Mul (lr, p[loss]->grad("focus", {Index("k")})->normalize()));
+    builder.incr(ctx,
+            new Mul (lr, p[loss]->grad("ctx", {Index("k")})->normalize()));
     cout << p.to_str();
 }
 
@@ -1035,5 +1255,6 @@ int main(int argc, char **argv) {
     test_expr_matvec();
     test_expr_tanh();
     test_program_dot();
+    test_dot_batched();
     // test_expr_rnn_batched();
 }
