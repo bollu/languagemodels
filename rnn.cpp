@@ -288,7 +288,7 @@ struct Arr : public Expr {
         assert(ixs.size() == 0);
         if (arr == name) return new ConstantInt(1);
         return new ConstantInt(0);
-    };
+    }
 
     Expr *subst(Index old, Index new_) const {
         // if we ever get here, then we should be 0-dimensional
@@ -1216,6 +1216,40 @@ void test_dot_batched() {
 }
 
 
+void test_dot_indirect() {
+    cout << "*****program indirect dot*****\n";
+    static const int VOCABSIZE = 10;
+    static const int EMBEDSIZE = 4;
+    Arr *embeds = new Arr("embeds", VOCABSIZE, EMBEDSIZE);
+    // Arr *focusix = new Arr("focusix");
+    // Arr *ctxix = new Arr("ctxix");
+    Arr *focus = new Arr("focus", EMBEDSIZE);
+    Arr *ctx = new Arr("ctx", EMBEDSIZE);
+    Arr *dot = new Arr("dot");
+    Arr *loss = new Arr("loss");
+
+    Index focusixIndex("focusix"), ctxixIndex("ctxix"), i("i");;
+    Program p;
+
+    IRBuilder builder(p);
+    
+
+    builder.reference(focus, embeds->sliceArray(focusixIndex));
+    builder.reference(ctx, embeds->sliceArray(ctxixIndex));
+
+    builder.copy(dot, new Contract(i, new Mul(focus->ix(i), ctx->ix(i))));
+    builder.copy(loss, new Sub(new ConstantInt(1), p[dot]));
+
+
+    Expr *lr = new ConstantFloat(1e-2);
+
+    builder.incr(focus, 
+        new Mul (lr, p[loss]->grad("focus", {Index("k")})->normalize()));
+    builder.incr(ctx,
+            new Mul (lr, p[loss]->grad("ctx", {Index("k")})->normalize()));
+    cout << p.to_str();
+}
+
 int main(int argc, char **argv) {
     if (argc != 2) {
         cout << "usage: <input-path>\n";
@@ -1256,5 +1290,6 @@ int main(int argc, char **argv) {
     test_expr_tanh();
     test_program_dot();
     test_dot_batched();
+    test_dot_indirect();
     // test_expr_rnn_batched();
 }
