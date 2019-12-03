@@ -755,15 +755,15 @@ struct Block : public Stmt {
 
 };
 
-struct For : public Stmt {
+struct Forall : public Stmt {
     Index ix;
     Block inner;
 
-    For (Index ix) : ix(ix) {};
+    Forall (Index ix) : ix(ix) {};
 
     string to_str(int depth) const {
         string s = "";
-        s += "for " + ix.name + " {\n";
+        s += "forall " + ix.name + " {\n";
         s += inner.to_str(depth + 1);
         s += "\n" + string(' ', depth) + "}";
         return s;
@@ -800,11 +800,11 @@ struct IRBuilder {
         insertPoint = &p.stmts;
     }
 
-    void setInsertPoint(For &f) {
+    void setInsertPoint(Forall &f) {
         insertPoint = &f.inner;
     }
 
-    void setInsertPoint(For *f) {
+    void setInsertPoint(Forall *f) {
         insertPoint = &f->inner;
     }
 
@@ -824,8 +824,8 @@ struct IRBuilder {
         insertPoint->stmts.push_back(new Assign(AssignType::Reference, arr, rhs));
     }
 
-    For *insertFor(Index ix) {
-        For *f = new For(ix);
+    Forall *insertFor(Index ix) {
+        Forall *f = new Forall(ix);
         insertPoint->stmts.push_back(f);
         return f;
     }
@@ -1195,7 +1195,7 @@ void test_dot_batched() {
 
     IRBuilder builder(p);
     // builder.setInsertPoint(builder.insertFor(bi));
-    For *forbi = builder.insertFor(bi);
+    Forall *forbi = builder.insertFor(bi);
     builder.setInsertPoint(forbi);
     
 
