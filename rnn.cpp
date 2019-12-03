@@ -134,10 +134,8 @@ enum class ExprType {
     Add,
     Sub,
     Mul,
-    Undef,
     Arr,
-    SaturatedSlice,
-    UnsaturatedSlice,
+    Index,
     Contract,
     Delta,
     ConstantInt,
@@ -146,13 +144,12 @@ enum class ExprType {
 };
 
 
-struct SaturatedSlice;
-struct UnsaturatedSlice;
+struct Index;
 struct Arr;
 
 struct Expr {
     // gives type of expression
-    ExprType ty = ExprType::Undef;
+    ExprType ty;
     Expr(ExprType ty): ty(ty) {};
 
     Expr *contract(const Arr* ix);
@@ -234,8 +231,6 @@ struct Arr : public Expr {
     Expr *ix(const Arr *ix1);
     Expr *ix(const Arr *ix, const Arr *ix2);
 
-    // helpers to take a SaturatedSlice
-    Expr *sliceArray(const Arr *ix);
 };
 
 string Expr::to_str_with_shape() const {
@@ -441,15 +436,14 @@ struct Mul : public Expr {
 };
 
 
-struct SaturatedSlice : public Expr {
+struct Index : public Expr {
     Arr *arr;
     vector<const Arr*> ixs;
 
-    SaturatedSlice(Arr *arr, vector<const Arr*> ixs): 
-        Expr(ExprType::SaturatedSlice), arr(arr), ixs(ixs) {
+    Index(Arr *arr, vector<const Arr*> ixs): 
+        Expr(ExprType::Index), arr(arr), ixs(ixs) {
             for (const Arr *ix : ixs) {
-                assert(ix->shape().ndim == 0 &&
-                    "slices must be zero-dimensional");
+                assert(ix->shape().ndim == 0 &&"slices must be zero-dimensional");
             }
 
             // ensure that we are fully indexing the array.
@@ -482,7 +476,7 @@ struct SaturatedSlice : public Expr {
         // can only take gradients if the slice is fully saturated
         assert((int)ixs.size() == arr->shape().ndim);
 
-        // this IS the SaturatedSlice of an array, but not the array we are
+        // this IS the Index of an array, but not the array we are
         // looking for. Return zero
         if(name != arr->name) { return new ConstantInt(0); }
 
@@ -506,7 +500,7 @@ struct SaturatedSlice : public Expr {
         for(int i = 0; i < (int)ixs.size(); ++i) {
             ixsnew.push_back(ixs[i] == old ? new_ : ixs[i]);
         }
-        return new SaturatedSlice(arr, ixsnew);
+        return new Index(arr, ixsnew);
     }
 
 };
@@ -514,19 +508,15 @@ struct SaturatedSlice : public Expr {
 
 
 Expr *Arr::ix(vector<const Arr*> ixs) {
-    return new SaturatedSlice(this, ixs);
+    return new Index(this, ixs);
 }
 
 Expr *Arr::ix(const Arr* ix1) {
-    return new SaturatedSlice(this, {ix1});
+    return new Index(this, {ix1});
 }
 
 Expr *Arr::ix(const Arr* ix1, const Arr* ix2) {
-    return new SaturatedSlice(this, {ix1, ix2});
-}
-
-Expr *Arr::sliceArray(const Arr*ix1) {
-    return new SaturatedSlice(this, {ix1});
+    return new Index(this, {ix1, ix2});
 }
 
 
@@ -971,7 +961,7 @@ bool is_char_word_break(char c) {
 extern "C" int __lsan_is_turned_off() { return 1; }
 
 // consume whitespace and get the next word, or empty string if run out.
-string parse_word(FILE *f) {
+string parse_word(FILE *f) {    
     char c;
     do {
         c = fgetc(f);
@@ -1140,8 +1130,8 @@ void test_dot_batched() {
     builder.setInsertPoint(forbi);
     
 
-    builder.reference(focus, focuses->sliceArray(bi));
-    builder.reference(ctx, ctxes->sliceArray(bi));
+    builder.reference(focus, focuses->ix(bi));
+    builder.reference(ctx, ctxes->ix(bi));
 
     builder.copy(dot, new Contract(i, new Mul(focus->ix(i), ctx->ix(i))));
     builder.copy(loss, new Sub(new ConstantInt(1), p[dot]));
@@ -1176,7 +1166,6 @@ void test_dot_batched_indirect() {
     Arr *bi = new Arr("bi");
     Arr *i = new Arr("i");
     Program p;
-
     IRBuilder builder(p);
     // builder.setInsertPoint(builder.insertFor(bi));
     Forall *forbi = builder.insertFor(bi);
@@ -1185,8 +1174,8 @@ void test_dot_batched_indirect() {
     builder.copy(fix, focusixs->ix(bi));
     builder.copy(cix, ctxixs->ix(bi));
     
-    builder.reference(focus, embeds->sliceArray(fix));
-    builder.reference(ctx, embeds->sliceArray(cix));
+    builder.reference(focus, embeds->ix(fix));
+    builder.reference(ctx, embeds->ix(cix));
 
     builder.copy(dot, new Contract(i, new Mul(focus->ix(i), ctx->ix(i))));
     builder.copy(loss, new Sub(new ConstantInt(1), p[dot]));
@@ -1221,8 +1210,8 @@ void test_dot_indirect() {
     IRBuilder builder(p);
     
 
-    builder.reference(focus, embeds->sliceArray(focusix));
-    builder.reference(ctx, embeds->sliceArray(ctxix));
+    builder.reference(focus, embeds->ix(focusix));
+    builder.reference(ctx, embeds->ix(ctxix));
 
     builder.copy(dot, new Contract(i, new Mul(focus->ix(i), ctx->ix(i))));
     builder.copy(loss, new Sub(new ConstantInt(1), p[dot]));
