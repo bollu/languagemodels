@@ -146,6 +146,7 @@ enum class ExprType {
 
 struct Index;
 struct Arr;
+struct Program; 
 
 struct Expr {
     // gives type of expression
@@ -417,9 +418,8 @@ struct Mul : public Expr {
         vector<Expr *> dsum;
 
         for(int i = 0; i < (int)inner.size(); ++i) {
-            vector<Expr *> dinner_i = inner;
+            vector<Expr *> dinner_i = this->inner;
             dinner_i[i] = dinner_i[i]->grad(name, ixs);
-
             dsum.push_back(new Mul(dinner_i));
         }
 
@@ -443,7 +443,8 @@ struct Index : public Expr {
     Index(Arr *arr, vector<const Arr*> ixs): 
         Expr(ExprType::Index), arr(arr), ixs(ixs) {
             for (const Arr *ix : ixs) {
-                assert(ix->shape().ndim == 0 &&"slices must be zero-dimensional");
+                assert(ix->shape().ndim == 0 &&
+                        "slices must be zero-dimensional");
             }
 
             // ensure that we are fully indexing the array.
@@ -589,6 +590,10 @@ struct ExprVisitor {
             return visitMul(m);
         } else if (Contract *c = dynamic_cast<Contract *>(e)) {
             return visitContract(c);
+        } else if (Index *i = dynamic_cast<Index *>(e)) {
+            return visitIndex(i);
+        } else if (Arr *a = dynamic_cast<Arr *>(e)) {
+            return visitArr(a);
         } else {
             return e;
         }
@@ -618,6 +623,18 @@ struct ExprVisitor {
         Expr *inner = visitExpr(c->inner);
         return new Contract(c->ix, inner);
     }
+
+    virtual Expr *visitArr(Arr *a) {
+        return new Arr(a->name, a->sh);
+    }
+
+    virtual Expr *visitIndex(Index *i) {
+        Expr *e = visitArr(i->arr);
+        if (Arr *a = dynamic_cast<Arr *>(e)) {
+            return new Index(a, i->ixs);
+        }
+        return nullptr;
+    }
 };
 
 enum class AssignType {
@@ -632,6 +649,7 @@ struct Stmt {
     // return the RHS of the expression if the statement has it.
     // return nullptr otherwise;
     virtual void findArr(Arr *arr, Expr **arrptr)  = 0;
+    virtual std::map<Arr *, Expr *> arrays() = 0;
 };
 
 struct Assign : public Stmt {
@@ -658,6 +676,11 @@ struct Assign : public Stmt {
         if (arr == lhs) {  *arrptr = rhs; }
         else { *arrptr = nullptr; }
     }
+
+    std::map<Arr *, Expr *> arrays() {
+        return { {lhs, rhs}};
+
+    }
 };
 
 struct Block : public Stmt {
@@ -680,6 +703,15 @@ struct Block : public Stmt {
         }
     }
 
+    std::map<Arr *, Expr *> arrays() {
+        std::map<Arr *, Expr *> m;
+        for(Stmt *s : stmts) {
+            std::map<Arr *, Expr *> sm = s->arrays();
+            m.insert(sm.begin(), sm.end());
+        }
+        return m;
+    }
+
 
 };
 
@@ -700,6 +732,10 @@ struct Forall : public Stmt {
     virtual void findArr(Arr *arr, Expr **arrptr) {
         return inner.findArr(arr, arrptr);
     }
+
+    std::map<Arr *, Expr *> arrays() {
+        return inner.arrays();
+    }
 };
 
 struct Program {
@@ -715,6 +751,9 @@ struct Program {
         return arrptr;
     }
 
+    std::map<Arr *, Expr *> arrays() {
+        return stmts.arrays();
+    }
 };
 
 // welcome LLVM my old friend
@@ -820,7 +859,36 @@ struct ConstantFoldVisitor : ExprVisitor {
 
         if (inner.size() == 1) { return inner[0]; }
         if (inner.size() == 0) { return new ConstantInt(1); }
-        return new Mul(inner);
+
+
+        m = new Mul(inner);
+
+        // Used to expose dirac deltas.
+        // convert (* x[i] (- 0 y)) into (* x[i] y -1)
+        // this is useful so that we can have 
+        // (>< i (* x[i] (- 0 delta_i_j)))
+        // => (>< i (* x[i] delta_i_j -1))
+        // => (* x[j] -1)
+        inner.clear();
+        for(Expr *e : m->inner) {
+            cout << "inspecting: " << m->to_str() << " | " << e->to_str() << "\n";
+            if(auto *s = dynamic_cast<Sub *>(e)) {
+                if (is_const_zero(s->l)) {
+                    inner.push_back(new ConstantInt(-1));
+                    inner.push_back(s->r);
+                    continue;
+                }
+            } 
+
+            inner.push_back(e);
+        }
+
+        if (inner.size() == 1) { return inner[0]; }
+        if (inner.size() == 0) { return new ConstantInt(1); }
+
+        m = new Mul(inner);
+        return m;
+    
     }
 
     virtual Expr *visitAdd(Add *a) {
@@ -832,7 +900,7 @@ struct ConstantFoldVisitor : ExprVisitor {
 
         if (inner.size() == 1) return inner[0];
         if (inner.size() == 0) { return new ConstantInt(0); }
-        
+
         return new Add(inner);
     }
 
@@ -857,10 +925,20 @@ int findDeltaForIndex(const Arr* ix, vector<Expr *> es) {
     return -1;
 }
 
-// eliminate (>< i (* t1 t2 (δ i->j) t3)) with 
+// 1. eliminate (>< i (* t1 t2 (δ i->j) t3)) with 
 //     (* t1[i->j] t2[i->j] t3[i->j])
+//
+// 2. eliminate (>< i (δ i->j)) with (1) 
 struct EliminateContractionVisitor : public ExprVisitor {
     virtual Expr *visitContract(Contract *c) {
+        // 2. eliminate (>< i (δ i->j)) with (1) 
+        if (Delta *d = dynamic_cast<Delta *>(c->inner)) {
+            if (d->old == c->ix) {
+                return new ConstantInt(1);
+            }
+        };
+
+        // 1. eliminate products of dirac deltas
         Mul *m = dynamic_cast<Mul *>(c->inner);
         if (!m) { 
             return new Contract(c->ix, ExprVisitor::visitExpr(c->inner));
@@ -923,7 +1001,7 @@ Expr *simplify(Expr *e, bool debug) {
     ConstantFoldVisitor cfv;
     EliminateContractionVisitor ecv;
     FlattenVisitor fv;
-    for(int i = 0; i < 5; ++i) {
+    for(int i = 0; i < 1; ++i) {
         if (debug) {
             cout << "--\n";
             cout << i << "|"  << e->to_str() << "\n";
@@ -1248,6 +1326,64 @@ Expr *cell(Arr *I2H, Arr *H2H, Arr *i, Arr *h, Arr *ix) {
     return new Tanh(new Add(matvecmul(I2H, i, ix), matvecmul(H2H, h, ix)));
 }
 
+// compute dy/dx
+Expr *gradProgram(Program &p, Expr *y, Arr *x) {
+    const map<Arr *, Expr *> arr2expr = p.arrays();
+
+    // if we have l in the program, then recursively grad the expression
+    Arr *a = dynamic_cast<Arr *>(y);
+    if (a) {
+        // a naked array can only be 0-dimensional. Otherwise,
+        // it must have been sliced.
+        assert(a->sh.ndim == 0);
+        auto it = arr2expr.find(a);
+        // this array does not have an expression associated to it,
+        // so we can differentiate it as if it were a leaf.
+        if (it == arr2expr.end()) {
+            if (a->name == x->name) { 
+                return new ConstantInt(1);
+            } else {
+                return new ConstantInt(0);
+            }
+        } else {
+            // we differentiate the inner expression
+            // d(scalar)/dx = d(scalar value)/dx
+        }
+    }
+    
+    return nullptr;
+
+}
+
+struct ArrayGatherVisitor : public ExprVisitor {
+    set<Arr *> arrays;
+    Expr *visitArr(Arr *a) {
+        arrays.insert(a);
+        return nullptr;
+    }
+};
+
+// take the derivatives of this expression with all arrays
+// that occur within it.
+void takeDerivatives(Program &p, Expr *e, string name) {
+    ArrayGatherVisitor agv;
+    agv.visitExpr(e);
+
+    IRBuilder builder(p);
+    for(Arr *a : agv.arrays) {
+        vector<const Arr *> ixs;
+        for (int i = 0; i < a->sh.ndim; ++i)
+            ixs.push_back(new Arr("i" + to_string(i)));
+        builder.copy(new Arr("d" + name + "_d" + a->name), 
+                e->grad(a->name, ixs)->normalize());
+
+        cout << "\n\n";
+        simplify(e->grad(a->name, ixs), true);
+        cout << "\n\n";
+    }
+
+}
+
 void test_lstm() {
     static const int EMBEDSIZE = 5;
     static const int HIDDENSIZE = 10;
@@ -1287,13 +1423,16 @@ void test_lstm() {
 
     Arr *output = new Arr("o", EMBEDSIZE);
     Arr *loss = new Arr("l");
-    builder.copy(loss, l2(predict, output));
+    builder.copy(loss, l2(output, predict));
 
     cout << "*****LSTM*****:\n";
     cout << p.to_str();
 
-    cout << "\n\t|" << p[loss]->grad("H2H", {new Arr("i'"), new Arr("j'")})->normalize()->to_str_with_shape() << "|";
+    cout << "\n\t|" << p[loss]->grad("H2H", {new Arr("i'"), new Arr("j'")})->normalize()->to_str_with_shape() << "|\n";
 
+    takeDerivatives(p, p[loss], "l");
+
+    cout << p.to_str();
 }
 
 
