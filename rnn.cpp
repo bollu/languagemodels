@@ -234,7 +234,6 @@ struct Arr : public Expr {
     Expr *ix(const Arr *ix1);
     Expr *ix(const Arr *ix, const Arr *ix2);
 
-
     // helpers to take a SaturatedSlice
     Expr *sliceArray(const Arr *ix);
 };
@@ -450,12 +449,12 @@ struct SaturatedSlice : public Expr {
         Expr(ExprType::SaturatedSlice), arr(arr), ixs(ixs) {
             assert(arr && "must only SaturatedSlice arrays");
             // ensure that we are fully indexing the array.
-            if(arr->shape().ndim != (int)ixs.size()) {
+            if((int)ixs.size() > arr->shape().ndim) {
                 cout << "array " << arr->to_str() << "| shape: " 
                     << arr->shape().to_str() << " | nixs: " << ixs.size()
                     << "\n";
             };
-            assert(arr->shape().ndim == (int)ixs.size());
+            assert((int)ixs.size() <= arr->shape().ndim);
 
             // TODO: assert that these are all zero dimensional arrays
 
@@ -479,6 +478,9 @@ struct SaturatedSlice : public Expr {
     }
 
     Expr *grad(string name, vector<const Arr*> gixs) {
+        // can only take gradients if the slice is fully saturated
+        assert((int)ixs.size() == arr->shape().ndim);
+
         // this IS the SaturatedSlice of an array, but not the array we are
         // looking for. Return zero
         if(name != arr->name) { return new ConstantInt(0); }
@@ -508,69 +510,6 @@ struct SaturatedSlice : public Expr {
 
 };
 
-struct UnsaturatedSlice : public Expr {
-    Arr *arr;
-    vector<const Arr*> ixs;
-
-    UnsaturatedSlice(Arr *arr, vector<const Arr*> ixs): 
-        Expr(ExprType::UnsaturatedSlice), arr(arr), ixs(ixs) {
-            assert(arr && "must only UnsaturatedSlice arrays");
-            // ensure that we are fully indexing the array.
-            if(arr->shape().ndim < (int)ixs.size()) {
-                cout << "array " << arr->to_str() << "| shape: " 
-                    << arr->shape().to_str() << " | nixs: " << ixs.size()
-                    << "\n";
-            };
-            assert(arr->shape().ndim > (int)ixs.size());
-
-        }; 
-
-    string to_str() const  {
-        string s = arr->to_str() + "[";
-
-        for(int i = 0; i < (int)ixs.size(); ++i) {
-            s += ixs[i]->to_str() + (i < (int)ixs.size() - 1 ? " " : "");
-        }
-
-        s += "]";
-        return s;
-    }
-
-    set<const Arr*> free() const {
-        set<const Arr*> s = arr->free();
-        for (const Arr* ix :ixs) { s.insert(ix); };
-        return s;
-    }
-
-    Expr *grad(string name, vector<const Arr*> gixs) {
-        // this IS the UnsaturatedSlice of an array, but not the array we are
-        // looking for. Return zero
-        if(name != arr->name) { return new ConstantInt(0); }
-
-        // we ARE the slce of the array we were looking for.
-        assert(name == arr->name);
-
-        assert(gixs.size() >= 1);
-        assert(gixs.size() == ixs.size());
-
-        // create deltas, one for each index of the array.
-        Expr *cur = new Delta(ixs[0], gixs[0]);
-        for(int i = 1; i < (int)ixs.size(); ++i) {
-            cur = new Mul(cur, new Delta(ixs[i], gixs[i]));
-        }
-        return cur;
-    }
-
-    // substitute old indeces for new indeces.
-    virtual Expr *subst(const Arr* old, const Arr* new_) const {
-        vector<const Arr*> ixsnew;
-        for(int i = 0; i < (int)ixs.size(); ++i) {
-            ixsnew.push_back(ixs[i] == old ? new_ : ixs[i]);
-        }
-        return new UnsaturatedSlice(arr, ixsnew);
-    }
-
-};
 
 
 Expr *Arr::ix(vector<const Arr*> ixs) {
@@ -586,7 +525,7 @@ Expr *Arr::ix(const Arr* ix1, const Arr* ix2) {
 }
 
 Expr *Arr::sliceArray(const Arr*ix1) {
-    return new UnsaturatedSlice(this, {ix1});
+    return new SaturatedSlice(this, {ix1});
 }
 
 
