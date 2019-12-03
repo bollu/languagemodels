@@ -302,10 +302,12 @@ struct Arr : public Expr {
     Expr *ix(Index ix1);
     Expr *ix(Index ix, Index ix2);
 
+
     // helpers to take a SaturatedSlice
     Expr *sliceArray(Index ix);
-
-
+    // Can index with a scalar array. TODO: write checks to make sure this code
+    // generates correctly
+    Expr *sliceArray(const Arr *ix1);
 };
 
 
@@ -591,6 +593,13 @@ Expr *Arr::ix(Index ix1, Index ix2) {
 Expr *Arr::sliceArray(Index ix1) {
     return new UnsaturatedSlice(this, {ix1});
 }
+
+Expr *Arr::sliceArray(const Arr *ix1) {
+    assert(ix1 && "array incorrect");
+    assert(ix1->sh.ndim == 0 &&
+        "can only slice with zero dimensional arrays");
+    return new UnsaturatedSlice(this, {ix1->name});
+};
 
 
 struct Contract : public Expr {
@@ -1216,26 +1225,70 @@ void test_dot_batched() {
 }
 
 
+void test_dot_batched_indirect() {
+    cout << "*****program batched, indirect addressed dot (final code that we need for word embeddings)*****\n";
+    static const int BATCHSIZE = 10;
+    static const int EMBEDSIZE = 4;
+    Arr *focusixs = new Arr("focus_ixs", BATCHSIZE);
+    Arr *fix = new Arr("fix");
+    
+    Arr *ctxixs = new Arr("ctx_ixs", BATCHSIZE);
+    Arr *cix = new Arr("cix");
+
+    Arr *embeds = new Arr("embeds", BATCHSIZE, EMBEDSIZE);
+    Arr *focus = new Arr("focus", EMBEDSIZE);
+    Arr *dot = new Arr("dot");
+    Arr *ctx = new Arr("ctx", EMBEDSIZE);
+    Arr *loss = new Arr("loss");
+
+    Index bi("bi"), i("i");
+    Program p;
+
+    IRBuilder builder(p);
+    // builder.setInsertPoint(builder.insertFor(bi));
+    Forall *forbi = builder.insertFor(bi);
+    builder.setInsertPoint(forbi);
+    
+    builder.copy(fix, focusixs->ix(bi));
+    builder.copy(cix, ctxixs->ix(bi));
+    
+    builder.reference(focus, embeds->sliceArray(fix));
+    builder.reference(ctx, embeds->sliceArray(cix));
+
+    builder.copy(dot, new Contract(i, new Mul(focus->ix(i), ctx->ix(i))));
+    builder.copy(loss, new Sub(new ConstantInt(1), p[dot]));
+
+
+    Expr *lr = new ConstantFloat(1e-2);
+
+    builder.incr(focus, 
+        new Mul (lr, p[loss]->grad("focus", {Index("k")})->normalize()));
+    builder.incr(ctx,
+            new Mul (lr, p[loss]->grad("ctx", {Index("k")})->normalize()));
+    cout << p.to_str();
+}
+
+
 void test_dot_indirect() {
     cout << "*****program indirect dot*****\n";
     static const int VOCABSIZE = 10;
     static const int EMBEDSIZE = 4;
     Arr *embeds = new Arr("embeds", VOCABSIZE, EMBEDSIZE);
-    // Arr *focusix = new Arr("focusix");
-    // Arr *ctxix = new Arr("ctxix");
+    Arr *focusix = new Arr("focusix");
+    Arr *ctxix = new Arr("ctxix");
     Arr *focus = new Arr("focus", EMBEDSIZE);
     Arr *ctx = new Arr("ctx", EMBEDSIZE);
     Arr *dot = new Arr("dot");
     Arr *loss = new Arr("loss");
 
-    Index focusixIndex("focusix"), ctxixIndex("ctxix"), i("i");;
+    Index i("i");
     Program p;
 
     IRBuilder builder(p);
     
 
-    builder.reference(focus, embeds->sliceArray(focusixIndex));
-    builder.reference(ctx, embeds->sliceArray(ctxixIndex));
+    builder.reference(focus, embeds->sliceArray(focusix));
+    builder.reference(ctx, embeds->sliceArray(ctxix));
 
     builder.copy(dot, new Contract(i, new Mul(focus->ix(i), ctx->ix(i))));
     builder.copy(loss, new Sub(new ConstantInt(1), p[dot]));
@@ -1291,5 +1344,7 @@ int main(int argc, char **argv) {
     test_program_dot();
     test_dot_batched();
     test_dot_indirect();
+    test_dot_batched_indirect();
+
     // test_expr_rnn_batched();
 }
