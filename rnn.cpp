@@ -145,47 +145,31 @@ enum class ExprType {
     Tanh,
 };
 
-struct Index {
-    string name;
-    Index(string name) : name(name) {};
-
-    bool operator == (const Index &other) const { return name == other.name; }
-    bool operator != (const Index &other) const { return name != other.name; }
-    bool operator < (const Index &other) const { return name < other.name; }
-
-    string to_str() const { return name; };
-};
 
 struct SaturatedSlice;
 struct UnsaturatedSlice;
+struct Arr;
 
 struct Expr {
     // gives type of expression
     ExprType ty = ExprType::Undef;
     Expr(ExprType ty): ty(ty) {};
 
-    Expr *contract(Index ix);
+    Expr *contract(const Arr* ix);
 
     // print as string
     virtual string to_str() const = 0;
 
     // return free indeces
-    virtual set<Index> free() const = 0;
+    virtual set<const Arr *> free() const = 0;
 
     // substitute old indeces for new indeces.
-    virtual Expr *subst(Index old, Index new_) const = 0;
+    virtual Expr *subst(const Arr* old, const Arr* new_) const = 0;
 
     // creates dirac deltas by taking gradients
-    virtual Expr *grad(string name, vector<Index> ixs) = 0;
+    virtual Expr *grad(string name, vector<const Arr *> ixs) = 0;
 
-    string detailed_to_str() const {
-        string s = "";
-        s += "[";
-        for(Index i : free()) s += i.name + ",";
-        s += "] ";
-        s += to_str();
-        return s;
-    }
+    string to_str_with_shape() const;
 
     // simplify the expression to normal form
     Expr *normalize();
@@ -198,69 +182,14 @@ struct ConstantInt : public Expr {
     ConstantInt(int i) : Expr(ExprType::ConstantInt), i(i) {};
 
     string to_str() const { return std::to_string(i); }
-    set<Index> free() const { return {}; }
-    Expr *grad(string name, vector<Index> ixs) { 
+    set<const Arr *> free() const { return {}; }
+    Expr *grad(string name, vector<const Arr *> ixs) { 
         return new ConstantInt(0);
     }
 
-    Expr *subst(Index old, Index new_) const {
+    Expr *subst(const Arr* old, const Arr* new_) const {
         return new ConstantInt(i);
     }
-
-};
-
-struct ConstantFloat : public Expr {
-    float f;
-    ConstantFloat(float f) : Expr(ExprType::ConstantFloat), f(f) {};
-
-    string to_str() const { return std::to_string(f); }
-    set<Index> free() const { return {}; }
-    Expr *grad(string name, vector<Index> ixs) { 
-        return new ConstantInt(0);
-    }
-
-    Expr *subst(Index old, Index new_) const {
-        return new ConstantFloat(f);
-    }
-
-};
-
-
-struct Delta : public Expr {
-    Index old;
-    Index new_;
-
-    Delta(Index old, Index new_) : 
-        Expr(ExprType::Delta), 
-    old(old), new_(new_) { };
-
-    string to_str() const {
-        string s = "(δ ";
-        s +=  old.to_str() + "->" + new_.to_str();
-        s += ")";
-        return s;
-    }
-
-    virtual set<Index> free() const {
-        set<Index> s;
-        s.insert(old);
-        s.insert(new_);
-        return s;
-    }
-
-    Expr *grad(string arr, vector<Index> ixs) {
-        return new ConstantInt(0);
-    };
-
-    Expr *subst(Index sold, Index snew) const {
-        // (i->k) delta_ij : delta_kj
-        // (i->k) delta_ji : delta_jk
-        // (i->k) delta_ii : delta_kk
-        // (i->k) delta_jl : delta_jl
-        return new Delta(old == sold ? snew : old,
-                    new_ == sold ? snew : new_);
-    }
-
 
 };
 
@@ -279,36 +208,100 @@ struct Arr : public Expr {
 
     string to_str() const { return name + sh.to_str(); };
 
-    set<Index> free() const {
-        return set<Index>();
+    set<const Arr *> free() const {
+        return set<const Arr *>();
     }
 
-    Expr *grad(string arr, vector<Index> ixs) {
+    Expr *grad(string garr, vector<const Arr *> ixs) {
         // if we ever get here, then we should be 0-dimensional
         assert(ixs.size() == 0);
-        if (arr == name) return new ConstantInt(1);
+        if (garr == name) { return new ConstantInt(1); };
         return new ConstantInt(0);
     }
 
-    Expr *subst(Index old, Index new_) const {
+    // do we not need to substitute the 1D array?
+    Expr *subst(const Arr *old, const Arr *new_) const {
         // if we ever get here, then we should be 0-dimensional
+        if (name == old->name) return new Arr(new_->name);
         return new Arr(name);
+        //return new Arr(name);
     }
 
     Shape shape() const { return sh; }
 
     // helpers to index
-    Expr *ix(vector<Index> ix);
-    Expr *ix(Index ix1);
-    Expr *ix(Index ix, Index ix2);
+    Expr *ix(vector<const Arr *> ix);
+    Expr *ix(const Arr *ix1);
+    Expr *ix(const Arr *ix, const Arr *ix2);
 
 
     // helpers to take a SaturatedSlice
-    Expr *sliceArray(Index ix);
-    // Can index with a scalar array. TODO: write checks to make sure this code
-    // generates correctly
-    Expr *sliceArray(const Arr *ix1);
+    Expr *sliceArray(const Arr *ix);
 };
+
+string Expr::to_str_with_shape() const {
+    string s = "";
+    s += "[";
+    for(const Arr *i : free()) s += i->name + ",";
+    s += "] ";
+    s += to_str();
+    return s;
+}
+
+
+
+struct ConstantFloat : public Expr {
+    float f;
+    ConstantFloat(float f) : Expr(ExprType::ConstantFloat), f(f) {};
+
+    string to_str() const { return std::to_string(f); }
+    set<const Arr*> free() const { return {}; }
+    Expr *grad(string name, vector<const Arr*> ixs) { 
+        return new ConstantInt(0);
+    }
+
+    Expr *subst(const Arr* old, const Arr* new_) const {
+        return new ConstantFloat(f);
+    }
+
+};
+
+
+struct Delta : public Expr {
+    const Arr* old;
+    const Arr* new_;
+
+    Delta(const Arr* old, const Arr* new_) : 
+        Expr(ExprType::Delta), 
+    old(old), new_(new_) { };
+
+    string to_str() const {
+        string s = "(δ ";
+        s +=  old->to_str() + "->" + new_->to_str();
+        s += ")";
+        return s;
+    }
+
+    virtual set<const Arr*> free() const {
+        return {old, new_};
+    }
+
+    Expr *grad(string arr, vector<const Arr*> ixs) {
+        return new ConstantInt(0);
+    };
+
+    Expr *subst(const Arr* sold, const Arr* snew) const {
+        // (i->k) delta_ij : delta_kj
+        // (i->k) delta_ji : delta_jk
+        // (i->k) delta_ii : delta_kk
+        // (i->k) delta_jl : delta_jl
+        return new Delta(old == sold ? snew : old,
+                    new_ == sold ? snew : new_);
+    }
+
+
+};
+
 
 
 struct Add : public Expr {
@@ -336,17 +329,17 @@ struct Add : public Expr {
         return s;
     }
 
-    set<Index> free() const {
-        set<Index> f;
+    set<const Arr*> free() const {
+        set<const Arr*> f;
 
         for(Expr *i: inner) {
-            set<Index> ifree = i->free();
+            set<const Arr*> ifree = i->free();
             f.insert(ifree.begin(), ifree.end());
         }
         return f;
     }
 
-    Expr *grad(string name, vector<Index> ixs) {
+    Expr *grad(string name, vector<const Arr*> ixs) {
         vector<Expr *>dinner;
         for(Expr *e : inner) {
             dinner.push_back(e->grad(name, ixs));
@@ -354,7 +347,7 @@ struct Add : public Expr {
         return new Add(dinner);
     }
 
-    Expr *subst(Index old, Index new_) const {
+    Expr *subst(const Arr* old, const Arr* new_) const {
         vector<Expr *> sinner;
         for(Expr *e : inner) {
             sinner.push_back(e->subst(old, new_));
@@ -372,21 +365,21 @@ struct Sub : public Expr {
         return "(- " + l->to_str() + " " + r->to_str() + ")";
     }
 
-    set<Index> free() const {
-        set<Index> f;
-        set<Index> lf = l->free();
+    set<const Arr*> free() const {
+        set<const Arr*> f;
+        set<const Arr*> lf = l->free();
         f.insert(lf.begin(), lf.end());
 
-        set<Index> rf = l->free();
+        set<const Arr*> rf = l->free();
         f.insert(rf.begin(), rf.end());
         return f;
     }
 
-    Expr *grad(string name, vector<Index> ixs) {
+    Expr *grad(string name, vector<const Arr*> ixs) {
         return new Sub(l->grad(name, ixs), r->grad(name, ixs));
     }
 
-    Expr *subst(Index old, Index new_) const {
+    Expr *subst(const Arr* old, const Arr* new_) const {
         return new Sub(l->subst(old, new_), r->subst(old, new_));
     }
 };
@@ -414,17 +407,17 @@ struct Mul : public Expr {
         return s;
     }
 
-    set<Index> free() const {
-        set<Index> f;
+    set<const Arr*> free() const {
+        set<const Arr*> f;
 
         for(Expr *i: inner) {
-            set<Index> ifree = i->free();
+            set<const Arr*> ifree = i->free();
             f.insert(ifree.begin(), ifree.end());
         }
         return f;
     }
 
-    Expr *grad(string name, vector<Index> ixs) {
+    Expr *grad(string name, vector<const Arr*> ixs) {
 
         // d(fgh) = df gh + f dg h + fg dh
         vector<Expr *> dsum;
@@ -439,7 +432,7 @@ struct Mul : public Expr {
         return new Add(dsum);
     }
 
-    Expr *subst(Index old, Index new_) const {
+    Expr *subst(const Arr* old, const Arr* new_) const {
         vector<Expr *> sinner;
         for(Expr *e : inner) {
             sinner.push_back(e->subst(old, new_));
@@ -451,9 +444,9 @@ struct Mul : public Expr {
 
 struct SaturatedSlice : public Expr {
     Arr *arr;
-    vector<Index> ixs;
+    vector<const Arr*> ixs;
 
-    SaturatedSlice(Arr *arr, vector<Index> ixs): 
+    SaturatedSlice(Arr *arr, vector<const Arr*> ixs): 
         Expr(ExprType::SaturatedSlice), arr(arr), ixs(ixs) {
             assert(arr && "must only SaturatedSlice arrays");
             // ensure that we are fully indexing the array.
@@ -464,26 +457,28 @@ struct SaturatedSlice : public Expr {
             };
             assert(arr->shape().ndim == (int)ixs.size());
 
+            // TODO: assert that these are all zero dimensional arrays
+
         }; 
 
     string to_str() const  {
         string s =  arr->to_str() + "[";
 
         for(int i = 0; i < (int)ixs.size(); ++i) {
-            s += ixs[i].to_str() + (i < (int)ixs.size() - 1 ? " " : "");
+            s += ixs[i]->to_str() + (i < (int)ixs.size() - 1 ? " " : "");
         }
 
         s += "]";
         return s;
     }
 
-    set<Index> free() const {
-        set<Index> s = arr->free();
-        for (Index ix :ixs) { s.insert(ix); };
+    set<const Arr*> free() const {
+        set<const Arr*> s = arr->free();
+        s.insert(ixs.begin(), ixs.end());
         return s;
     }
 
-    Expr *grad(string name, vector<Index> gixs) {
+    Expr *grad(string name, vector<const Arr*> gixs) {
         // this IS the SaturatedSlice of an array, but not the array we are
         // looking for. Return zero
         if(name != arr->name) { return new ConstantInt(0); }
@@ -503,8 +498,8 @@ struct SaturatedSlice : public Expr {
     }
 
     // substitute old indeces for new indeces.
-    virtual Expr *subst(Index old, Index new_) const {
-        vector<Index> ixsnew;
+    virtual Expr *subst(const Arr* old, const Arr* new_) const {
+        vector<const Arr*> ixsnew;
         for(int i = 0; i < (int)ixs.size(); ++i) {
             ixsnew.push_back(ixs[i] == old ? new_ : ixs[i]);
         }
@@ -515,9 +510,9 @@ struct SaturatedSlice : public Expr {
 
 struct UnsaturatedSlice : public Expr {
     Arr *arr;
-    vector<Index> ixs;
+    vector<const Arr*> ixs;
 
-    UnsaturatedSlice(Arr *arr, vector<Index> ixs): 
+    UnsaturatedSlice(Arr *arr, vector<const Arr*> ixs): 
         Expr(ExprType::UnsaturatedSlice), arr(arr), ixs(ixs) {
             assert(arr && "must only UnsaturatedSlice arrays");
             // ensure that we are fully indexing the array.
@@ -534,20 +529,20 @@ struct UnsaturatedSlice : public Expr {
         string s = arr->to_str() + "[";
 
         for(int i = 0; i < (int)ixs.size(); ++i) {
-            s += ixs[i].to_str() + (i < (int)ixs.size() - 1 ? " " : "");
+            s += ixs[i]->to_str() + (i < (int)ixs.size() - 1 ? " " : "");
         }
 
         s += "]";
         return s;
     }
 
-    set<Index> free() const {
-        set<Index> s = arr->free();
-        for (Index ix :ixs) { s.insert(ix); };
+    set<const Arr*> free() const {
+        set<const Arr*> s = arr->free();
+        for (const Arr* ix :ixs) { s.insert(ix); };
         return s;
     }
 
-    Expr *grad(string name, vector<Index> gixs) {
+    Expr *grad(string name, vector<const Arr*> gixs) {
         // this IS the UnsaturatedSlice of an array, but not the array we are
         // looking for. Return zero
         if(name != arr->name) { return new ConstantInt(0); }
@@ -567,70 +562,64 @@ struct UnsaturatedSlice : public Expr {
     }
 
     // substitute old indeces for new indeces.
-    virtual Expr *subst(Index old, Index new_) const {
-        vector<Index> ixsnew;
+    virtual Expr *subst(const Arr* old, const Arr* new_) const {
+        vector<const Arr*> ixsnew;
         for(int i = 0; i < (int)ixs.size(); ++i) {
             ixsnew.push_back(ixs[i] == old ? new_ : ixs[i]);
         }
-        return new SaturatedSlice(arr, ixsnew);
+        return new UnsaturatedSlice(arr, ixsnew);
     }
 
 };
 
 
-Expr *Arr::ix(vector<Index> ixs) {
+Expr *Arr::ix(vector<const Arr*> ixs) {
     return new SaturatedSlice(this, ixs);
 }
 
-Expr *Arr::ix(Index ix1) {
+Expr *Arr::ix(const Arr* ix1) {
     return new SaturatedSlice(this, {ix1});
 }
 
-Expr *Arr::ix(Index ix1, Index ix2) {
+Expr *Arr::ix(const Arr* ix1, const Arr* ix2) {
     return new SaturatedSlice(this, {ix1, ix2});
 }
 
-Expr *Arr::sliceArray(Index ix1) {
+Expr *Arr::sliceArray(const Arr*ix1) {
     return new UnsaturatedSlice(this, {ix1});
 }
 
-Expr *Arr::sliceArray(const Arr *ix1) {
-    assert(ix1 && "array incorrect");
-    assert(ix1->sh.ndim == 0 &&
-        "can only slice with zero dimensional arrays");
-    return new UnsaturatedSlice(this, {ix1->name});
-};
 
 
 struct Contract : public Expr {
-    Index ix;
+    const Arr* ix;
     Expr *inner;
-    Contract (Index ix, Expr *inner) : Expr(ExprType::Contract), ix(ix),
+    Contract (const Arr* ix, Expr *inner) : Expr(ExprType::Contract), ix(ix),
         inner(inner) {};
 
     string to_str() const {
-        return "(>< " + ix.to_str() + " " + inner->to_str() +  ")";
+        return "(>< " + ix->to_str() + " " + inner->to_str() +  ")";
     }
 
-    set<Index> free() const {
-        set<Index> infree = inner->free();
+    set<const Arr*> free() const {
+        set<const Arr*> infree = inner->free();
         auto it = infree.find(ix);
         if (it != infree.end()) infree.erase(it);
         return infree;
     }
 
-    Expr *grad(string name, vector<Index> ixs) {
+    Expr *grad(string name, vector<const Arr*> ixs) {
         return new Contract(ix, inner->grad(name, ixs));
     }
 
-    Expr *subst(Index old, Index new_) const {
+    Expr *subst(const Arr* old, const Arr* new_) const {
         return new Contract(ix == old ? new_ : ix, inner);
     }
 
 };
 
 
-Expr *Expr::contract(Index ix) {
+Expr *Expr::contract(const Arr* ix) {
     return new Contract(ix, this);
 }
 
@@ -642,16 +631,16 @@ struct Tanh : public Expr {
         return "(tanh " + inner->to_str() + ")";
     }
 
-    set<Index> free() const {
+    set<const Arr*> free() const {
         return inner->free();
     }
 
 
-    Expr *subst(Index old, Index new_) const { 
+    Expr *subst(const Arr* old, const Arr* new_) const { 
         return new Tanh(inner->subst(old, new_));
     }
 
-    Expr *grad(string name, vector<Index> ixs) {
+    Expr *grad(string name, vector<const Arr*> ixs) {
         Expr *dtan = new Sub(new ConstantInt(1), new Mul(new Tanh(inner), new
                     Tanh(inner)));
         Expr *dinner = inner->grad(name, ixs);
@@ -731,7 +720,7 @@ struct Assign : public Stmt {
             case AssignType::Incr: eqname = "+="; break;
         }
         return "(" + lhs->to_str() + " " + eqname + " " +
-            rhs->detailed_to_str() + ")";
+            rhs->to_str_with_shape() + ")";
     }
 
     virtual void findArr(Arr *arr, Expr **arrptr) {
@@ -765,14 +754,14 @@ struct Block : public Stmt {
 };
 
 struct Forall : public Stmt {
-    Index ix;
+    const Arr* ix;
     Block inner;
 
-    Forall (Index ix) : ix(ix) {};
+    Forall (const Arr* ix) : ix(ix) {};
 
     string to_str(int depth) const {
         string s = "";
-        s += "forall " + ix.name + " {\n";
+        s += "forall " + ix->name + " {\n";
         s += inner.to_str(depth + 1);
         s += "\n" + string(' ', depth) + "}";
         return s;
@@ -833,7 +822,7 @@ struct IRBuilder {
         insertPoint->stmts.push_back(new Assign(AssignType::Reference, arr, rhs));
     }
 
-    Forall *insertFor(Index ix) {
+    Forall *insertFor(const Arr* ix) {
         Forall *f = new Forall(ix);
         insertPoint->stmts.push_back(f);
         return f;
@@ -923,7 +912,7 @@ struct ConstantFoldVisitor : ExprVisitor {
 
 // return a Delta that is within es, which replaces the
 // the index ix. return -1 otherwise.
-int findDeltaForIndex(Index ix, vector<Expr *> es) {
+int findDeltaForIndex(const Arr* ix, vector<Expr *> es) {
     for(int i = 0; i < (int)es.size(); ++i) {
         Delta *d = dynamic_cast<Delta *>(es[i]);
         if(d && d->old == ix) return i;
@@ -1091,22 +1080,22 @@ void test_expr_dot() {
     int NDIMS = 3;
     Arr *a = new Arr("a", NDIMS);
     Arr *b = new Arr("b", NDIMS);
-    Index i("i");
+    Arr* i = new Arr("i");
     Expr *mul = new Mul(a->ix(i), b->ix(i));
     Expr *dot = new Contract(i, mul);
 
     cout << "***dot***\n";
-    cout << dot->detailed_to_str() << "\n";
-    Index k("k");
+    cout << dot->to_str_with_shape() << "\n";
+    Arr* k = new Arr("k");
     Expr *grad = dot->grad("a", {k});
-    cout << "## dot->grad[a k]: ##\n\t" << grad->detailed_to_str() << "\n";
+    cout << "## dot->grad[a k]: ##\n\t" << grad->to_str_with_shape() << "\n";
     simplify(grad, true);
 }
 
 // contract over all free indeces
 Expr* contractOverFree(Expr *e) {
-    set<Index> free = e->free();
-    for(Index ix : free) {
+    set<const Arr*> free = e->free();
+    for(const Arr* ix : free) {
         e = new Contract(ix, e);
     }
     return e;
@@ -1117,22 +1106,22 @@ void test_expr_matvec() {
     const int NIN = 3;
     Arr *a = new Arr("a", NOUT, NIN);
     Arr *b = new Arr("b", NIN);
-    Index i("i"), j("j");
+    Arr* i = new Arr("i"), *j = new Arr("j");
     Expr *mul = new Mul(a->ix(i, j), b->ix(j));
     Expr *matvec = new Contract(j, mul);
 
     cout << "***mul***\n";
-    cout << matvec->detailed_to_str() << "\n";
+    cout << matvec->to_str_with_shape() << "\n";
 
 
     // before we can take the gradient, we need to put a sum over all
     // free parameters
     Expr *grada = contractOverFree(matvec)->grad("a", 
-            {Index("k"), Index("l")});
+            {new Arr("k"), new Arr("l")});
     cout << "## mul->grad[a k l]: ##\n\t" << grada->to_str() << "\n";
     simplify(grada, true);
 
-    Expr *gradb = contractOverFree(matvec)->grad("b", {Index("k")});
+    Expr *gradb = contractOverFree(matvec)->grad("b", {new Arr("k")});
     cout << "## mul->grad[b k]: ##\n\t" << gradb->to_str() << "\n";
     simplify(gradb, true);
 }
@@ -1140,18 +1129,19 @@ void test_expr_matvec() {
 void test_expr_tanh() {
     const int NDIM = 3;
     Arr *a = new Arr("a", NDIM, NDIM);
-    Index i("i"), j("j");
+    Arr * i = new Arr("i");
+    Arr *j = new Arr("j");
     Expr *aixed = a->ix(i, j);
     Expr *matvec = new Tanh(aixed);
 
     cout << "***tanh on matrix***\n";
-    cout << matvec->detailed_to_str() << "\n";
+    cout << matvec->to_str_with_shape() << "\n";
 
 
     // before we can take the gradient, we need to put a sum over all
     // free parameters
     Expr *grada = contractOverFree(matvec)->grad("a", 
-            {Index("k"), Index("l")});
+            {new Arr("k"), new Arr("l")});
     cout << "## mul->grad[a k l]: ##\n\t" << grada->to_str() << "\n";
     simplify(grada, true);
 
@@ -1172,7 +1162,8 @@ void test_program_dot() {
     Arr *grada = new Arr("grada", ARRSIZE);
     Arr *gradb = new Arr("gradb", ARRSIZE);
     Arr *dot = new Arr("dot");
-    Index i("i"), k("k");
+    Arr *i = new Arr("i");
+    Arr *k = new Arr("k");
     builder.copy(dot, new Contract(i, new Mul(a->ix(i), b->ix(i))));
     builder.copy(grada, 
             new Mul(new ConstantFloat(1e-2), 
@@ -1199,7 +1190,8 @@ void test_dot_batched() {
     Arr *dot = new Arr("dot");
     Arr *loss = new Arr("loss");
 
-    Index bi("bi"), i("i");;
+    Arr *bi = new Arr("bi");
+    Arr *i = new Arr("i");
     Program p;
 
     IRBuilder builder(p);
@@ -1218,9 +1210,9 @@ void test_dot_batched() {
     Expr *lr = new ConstantFloat(1e-2);
 
     builder.incr(focus, 
-        new Mul (lr, p[loss]->grad("focus", {Index("k")})->normalize()));
+        new Mul (lr, p[loss]->grad("focus", {new Arr("k")})->normalize()));
     builder.incr(ctx,
-            new Mul (lr, p[loss]->grad("ctx", {Index("k")})->normalize()));
+            new Mul (lr, p[loss]->grad("ctx", {new Arr("k")})->normalize()));
     cout << p.to_str();
 }
 
@@ -1241,7 +1233,8 @@ void test_dot_batched_indirect() {
     Arr *ctx = new Arr("ctx", EMBEDSIZE);
     Arr *loss = new Arr("loss");
 
-    Index bi("bi"), i("i");
+    Arr *bi = new Arr("bi");
+    Arr *i = new Arr("i");
     Program p;
 
     IRBuilder builder(p);
@@ -1261,10 +1254,11 @@ void test_dot_batched_indirect() {
 
     Expr *lr = new ConstantFloat(1e-2);
 
+    Arr *k = new Arr("k");
     builder.incr(focus, 
-        new Mul (lr, p[loss]->grad("focus", {Index("k")})->normalize()));
+        new Mul (lr, p[loss]->grad("focus", {k})->normalize()));
     builder.incr(ctx,
-            new Mul (lr, p[loss]->grad("ctx", {Index("k")})->normalize()));
+            new Mul (lr, p[loss]->grad("ctx", {k})->normalize()));
     cout << p.to_str();
 }
 
@@ -1281,7 +1275,7 @@ void test_dot_indirect() {
     Arr *dot = new Arr("dot");
     Arr *loss = new Arr("loss");
 
-    Index i("i");
+    Arr *i = new Arr("i"), *k = new Arr("k");
     Program p;
 
     IRBuilder builder(p);
@@ -1297,9 +1291,9 @@ void test_dot_indirect() {
     Expr *lr = new ConstantFloat(1e-2);
 
     builder.incr(focus, 
-        new Mul (lr, p[loss]->grad("focus", {Index("k")})->normalize()));
+        new Mul (lr, p[loss]->grad("focus", {k})->normalize()));
     builder.incr(ctx,
-            new Mul (lr, p[loss]->grad("ctx", {Index("k")})->normalize()));
+            new Mul (lr, p[loss]->grad("ctx", {k})->normalize()));
     cout << p.to_str();
 }
 
