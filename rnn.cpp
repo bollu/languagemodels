@@ -385,7 +385,7 @@ struct Sub : public Expr {
         set<const Arr*> lf = l->free();
         f.insert(lf.begin(), lf.end());
 
-        set<const Arr*> rf = l->free();
+        set<const Arr*> rf = r->free();
         f.insert(rf.begin(), rf.end());
         return f;
     }
@@ -506,6 +506,7 @@ struct Index : public Expr {
         assert(name == arr->name);
 
         assert(gixs.size() >= 1);
+
         assert(gixs.size() == ixs.size());
 
         // create deltas, one for each index of the array.
@@ -683,20 +684,38 @@ struct Assign : public Stmt {
 
     Assign(AssignType type, Arr *lhs, vector<const Arr *> indeces, Expr *rhs) 
         : type(type), lhs(lhs), indeces(indeces), rhs(rhs) {
+
+            // TODO: add an exhaustiveness check that the set of indeces
+            // is equal to the set of free indeces.
+
             for (const Arr * ix: indeces) {
                 assert(ix->sh.ndim == 0);
             }
 
-            if (rhs->free().size() != indeces.size()) {
-                cerr << "mismatch between indeces and number of free variables\n";
-                cerr << "\tlhs: " << lhs->to_str_with_shape() << "\n";
-                cerr << "\tindeces: ";
-                for (const Arr *a : indeces) cerr << a->name << " ";
-                cerr << "\n\texpression: ";
-                cerr << rhs->to_str_with_shape() << "\n";
+            if (type == AssignType::Reference) {
+                if (indeces.size() >= rhs->free().size()) {
+                    cerr << "Taking a slice of zero or negative dimension\n";
+                    cerr << "\tlhs: " << lhs->to_str_with_shape() << "\n";
+                    cerr << "\tindeces: ";
+                    for (const Arr *a : indeces) cerr << a->name << " ";
+                    cerr << "\n\texpression: ";
+                    cerr << rhs->to_str_with_shape() << "\n";
+                }
+
+                assert(indeces.size() < rhs->free().size());
+            } else {
+                if (rhs->free().size() != indeces.size()) {
+                    cerr << "mismatch between indeces and number of free variables\n";
+                    cerr << "\tlhs: " << lhs->to_str_with_shape() << "\n";
+                    cerr << "\tindeces: ";
+                    for (const Arr *a : indeces) cerr << a->name << " ";
+                    cerr << "\n\texpression: ";
+                    cerr << rhs->to_str_with_shape() << "\n";
+                }
+
+                assert(rhs->free().size() == indeces.size() && 
+                        "need those many free variables as free indices");
             }
-            assert(rhs->free().size() == indeces.size() && 
-                    "need those many free variables as free indices");
         };
 
     string to_str(int depth) const {
@@ -958,6 +977,20 @@ struct ConstantFoldVisitor : ExprVisitor {
 
      virtual Expr *visitSub(Sub *b) {
         if(is_const_zero(b->r)) { return visitExpr(b->l); };
+
+        // convert (- 0 x) into (* (-1) x)
+        // Used to convert
+        //(>< i (- 0 (* (δ i->j) v[i]))
+        //=> (>< i (* -1 (δ i j) v[i]))
+        //=> (* -1 v[j])
+        if (is_const_zero(b->l)) {
+            if(Mul *m = dynamic_cast<Mul *>(b->r)) {
+                vector<Expr *> inner = m->inner;
+                inner.push_back(new ConstantInt(-1));
+                return visitExpr(new Mul(inner));
+            }
+        }
+
         return ExprVisitor::visitSub(b);
     }
 
@@ -1236,9 +1269,43 @@ void test_program_dot() {
     cout << p.to_str();
 }
 
-/*
-void test_dot_batched() {
+void test_program_dot_batched() {
+    static const int BATCHSIZE = 10;
+    static const int EMBEDSIZE = 4;
+    Arr *focuses = new Arr("focuses", BATCHSIZE, EMBEDSIZE);
+    Arr *ctxes = new Arr("ctxes", BATCHSIZE, EMBEDSIZE);
+    Arr *total_loss = new Arr("total_loss");
+
+    Arr *bi = new Arr("bi");
+    Arr *i = new Arr("i");
+
+    Program p;
+
+    IRBuilder builder(p);
+    Forall *forbi = builder.insertFor(bi);
+
+    builder.setInsertPoint(forbi);
+    Expr *dots = new Contract(i, new Mul(focuses->ix(bi, i), ctxes->ix(bi, i)));
+    Expr *losses = new Sub(new ConstantInt(1), dots);
+
+    builder.copy(total_loss, {}, new Contract(bi, losses));
+
+    Expr *lr = new ConstantFloat(1e-2);
+
+    Arr *dbi = new Arr("dbi"), *dk = new Arr("dk");
+    builder.incr(focuses, {dbi, dk},
+        new Mul (lr, p[total_loss]->grad("focuses", {dbi, dk})->normalize()));
+    builder.incr(ctxes, {dbi, dk},
+        new Mul (lr, p[total_loss]->grad("ctxes", {dbi, dk})->normalize()));
+
     cout << "*****program batched dot*****\n";
+    cout << p.to_str() << "\n";
+
+
+}
+
+void test_program_dot_batched_indirect() {
+    cout << "*****program batched, indirect addressed dot (final code that we need for word embeddings)*****\n";
     static const int BATCHSIZE = 10;
     static const int EMBEDSIZE = 4;
     Arr *focuses = new Arr("focuses", BATCHSIZE, EMBEDSIZE);
@@ -1249,7 +1316,7 @@ void test_dot_batched() {
     Arr *loss = new Arr("loss");
 
     Arr *bi = new Arr("bi");
-    Arr *i = new Arr("i");
+    Arr *i = new Arr("i"), *k = new Arr("k");
     Program p;
 
     IRBuilder builder(p);
@@ -1257,70 +1324,23 @@ void test_dot_batched() {
     Forall *forbi = builder.insertFor(bi);
     builder.setInsertPoint(forbi);
     
+    builder.reference(focus, {i}, focuses->ix(bi, i));
+    builder.reference(ctx, {i}, ctxes->ix(bi, i));
 
-    builder.reference(focus, focuses->ix(bi));
-    builder.reference(ctx, ctxes->ix(bi));
-
-    builder.copy(dot, new Contract(i, new Mul(focus->ix(i), ctx->ix(i))));
-    builder.copy(loss, new Sub(new ConstantInt(1), p[dot]));
-
+    builder.copy(dot, {}, new Contract(i, new Mul(focus->ix(i), ctx->ix(i))));
+    builder.copy(loss, {}, new Sub(new ConstantInt(1), p[dot]));
 
     Expr *lr = new ConstantFloat(1e-2);
 
-    builder.incr(focus, 
-        new Mul (lr, p[loss]->grad("focus", {new Arr("k")})->normalize()));
-    builder.incr(ctx,
-            new Mul (lr, p[loss]->grad("ctx", {new Arr("k")})->normalize()));
-    cout << p.to_str();
-}
-
-
-void test_dot_batched_indirect() {
-    cout << "*****program batched, indirect addressed dot (final code that we need for word embeddings)*****\n";
-    static const int BATCHSIZE = 10;
-    static const int EMBEDSIZE = 4;
-    Arr *focusixs = new Arr("focus_ixs", BATCHSIZE);
-    Arr *fix = new Arr("fix");
-    
-    Arr *ctxixs = new Arr("ctx_ixs", BATCHSIZE);
-    Arr *cix = new Arr("cix");
-
-    Arr *embeds = new Arr("embeds", BATCHSIZE, EMBEDSIZE);
-    Arr *focus = new Arr("focus", EMBEDSIZE);
-    Arr *dot = new Arr("dot");
-    Arr *ctx = new Arr("ctx", EMBEDSIZE);
-    Arr *loss = new Arr("loss");
-
-    Arr *bi = new Arr("bi");
-    Arr *i = new Arr("i");
-    Program p;
-    IRBuilder builder(p);
-    // builder.setInsertPoint(builder.insertFor(bi));
-    Forall *forbi = builder.insertFor(bi);
-    builder.setInsertPoint(forbi);
-    
-    builder.copy(fix, focusixs->ix(bi));
-    builder.copy(cix, ctxixs->ix(bi));
-    
-    builder.reference(focus, embeds->ix(fix));
-    builder.reference(ctx, embeds->ix(cix));
-
-    builder.copy(dot, new Contract(i, new Mul(focus->ix(i), ctx->ix(i))));
-    builder.copy(loss, new Sub(new ConstantInt(1), p[dot]));
-
-
-    Expr *lr = new ConstantFloat(1e-2);
-
-    Arr *k = new Arr("k");
-    builder.incr(focus, 
+    builder.incr(focus, {k},
         new Mul (lr, p[loss]->grad("focus", {k})->normalize()));
-    builder.incr(ctx,
+    builder.incr(ctx, {k},
             new Mul (lr, p[loss]->grad("ctx", {k})->normalize()));
     cout << p.to_str();
 }
 
 
-void test_dot_indirect() {
+void test_program_dot_indicrect() {
     cout << "*****program indirect dot*****\n";
     static const int VOCABSIZE = 10;
     static const int EMBEDSIZE = 4;
@@ -1338,18 +1358,18 @@ void test_dot_indirect() {
     IRBuilder builder(p);
     
 
-    builder.reference(focus, embeds->ix(focusix));
-    builder.reference(ctx, embeds->ix(ctxix));
+    builder.reference(focus, {i},  embeds->ix(focusix, i));
+    builder.reference(ctx, {i}, embeds->ix(ctxix, i));
 
-    builder.copy(dot, new Contract(i, new Mul(focus->ix(i), ctx->ix(i))));
-    builder.copy(loss, new Sub(new ConstantInt(1), p[dot]));
+    builder.copy(dot, {}, new Contract(i, new Mul(focus->ix(i), ctx->ix(i))));
+    builder.copy(loss, {}, new Sub(new ConstantInt(1), p[dot]));
 
 
     Expr *lr = new ConstantFloat(1e-2);
 
-    builder.incr(focus, 
+    builder.incr(focus, {k}, 
         new Mul (lr, p[loss]->grad("focus", {k})->normalize()));
-    builder.incr(ctx,
+    builder.incr(ctx, {k}, 
             new Mul (lr, p[loss]->grad("ctx", {k})->normalize()));
     cout << p.to_str();
 }
@@ -1424,7 +1444,7 @@ void takeDirectDerivatives(Program &p, Expr *e, string name, set<const Arr*> par
 
         Expr *grad = e->grad(a->name, ixs);
         cout << "d" << name << "/d" << a->name << ":\n\t" << grad->to_str_with_shape() << "\n";
-        builder.copy(new Arr("d" + name + "_d" + a->name), grad->normalize());
+        // builder.copy(new Arr("d" + name + "_d" + a->name), grad->normalize());
     }
 
 }
@@ -1490,10 +1510,10 @@ Expr* takeIndirectDerivatives(Program &p, Arr *y, Arr *x, map<pair<Arr *, Arr*>,
             for (int j = 0; j < path[i+1]->sh.ndim; ++j) {
                 ixs.push_back(new Arr("j" + to_string(j)));
             }
-            Expr *der = rhs->grad(path[i+1]->name, ixs)->normalize();
-            Arr *arrder = new Arr("d" + path[i]->name + "_" + "d" + path[i+1]->name);
-            builder.copy(arrder, der);
-            chainprod = new Mul(chainprod, arrder);
+            // Expr *der = rhs->grad(path[i+1]->name, ixs)->normalize();
+            // Arr *arrder = new Arr("d" + path[i]->name + "_" + "d" + path[i+1]->name);
+            // // builder.copy(arrder, der);
+            // chainprod = new Mul(chainprod, arrder);
         }
         allsum = new Add(allsum, chainprod);
     }
@@ -1529,17 +1549,17 @@ void test_lstm() {
 
     Arr *hprev = hiddens[0];
     for(int i = 0; i < NINPUTS; ++i) {
-        builder.copy(hiddens[i+1], cell(I2H, H2H, inputs[i], hprev, ix)); //new Tanh(matvecmul(H2H, hprev, ix)));
+        builder.copy(hiddens[i+1], {ix}, cell(I2H, H2H, inputs[i], hprev, ix)); //new Tanh(matvecmul(H2H, hprev, ix)));
         hprev = hiddens[i+1];
     }
 
     Arr *predict = new Arr("p", EMBEDSIZE);
-    builder.copy(predict, matvecmul(H2O, hprev, ix));
+    builder.copy(predict, {ix}, matvecmul(H2O, hprev, ix));
 
 
     Arr *output = new Arr("o", EMBEDSIZE);
     Arr *loss = new Arr("l");
-    builder.copy(loss, l2(output, predict));
+    builder.copy(loss, {}, l2(output, predict));
 
     cout << "*****LSTM*****:\n";
     cout << p.to_str();
@@ -1551,6 +1571,7 @@ void test_lstm() {
 
 
 
+    /*
     map<pair<Arr *, Arr *>, Arr*> ders;
     Expr *finalDer = takeIndirectDerivatives(p, loss, H2H, ders);
     builder.copy(new Arr("dl/dH2H"), finalDer->normalize());
@@ -1568,12 +1589,11 @@ void test_lstm() {
     // map<pair<Arr *, Arr *>, Arr*> ders;
     // Expr *finalDer = takeIndirectDerivatives(p, loss, H2H, ders);
     // builder.copy(new Arr("dloss_dH2H"), finalDer->normalize());
-
+    */
 
     cout << "*****LSTM(full)*****:\n";
     cout << p.to_str();
 }
-*/
 
 
 
@@ -1616,9 +1636,9 @@ int main(int argc, char **argv) {
     test_expr_matvec();
     test_expr_tanh();
     test_program_dot();
-    // test_dot_batched();
-    // test_dot_indirect();
-    // test_dot_batched_indirect();
+    test_program_dot_batched();
+    test_program_dot_indicrect();
+    test_program_dot_batched_indirect();
 
-    // test_lstm();
+    test_lstm();
 }
