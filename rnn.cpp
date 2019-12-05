@@ -574,12 +574,17 @@ Index *Arr::ix(const Arr* ix1, const Arr* ix2) {
 }
 
 
+// check that the contraction along this dimension is indeed correct.
+void verifyContractionShape(const Arr *ix, Expr *inner);
+
 
 struct Contract : public Expr {
     const Arr* ix;
     Expr *inner;
     Contract (const Arr* ix, Expr *inner) : Expr(ExprType::Contract), ix(ix),
-        inner(inner) {};
+        inner(inner) {
+            verifyContractionShape(ix, inner);
+        };
 
     string to_str() const {
         return "(>< " + ix->to_str() + " " + inner->to_str() +  ")";
@@ -688,10 +693,9 @@ struct ExprVisitor {
 
     virtual Expr *visitIndex(Index *i) {
         Expr *e = visitArr(i->arr);
-        if (Arr *a = dynamic_cast<Arr *>(e)) {
-            return new Index(a, i->ixs);
-        }
-        return nullptr;
+        Arr *a = dynamic_cast<Arr *>(e);
+        assert(a);
+        return new Index(a, i->ixs);
     }
 };
 
@@ -1193,6 +1197,57 @@ Expr *Expr::normalize() {
     return simplify(this, false);
 };
 
+struct IndexingVisitor : public ExprVisitor {
+    vector<Index *> indexes;
+
+    virtual Expr *visitIndex(Index *i) {
+        indexes.push_back(i);
+        return ExprVisitor::visitIndex(i);
+    }
+};
+
+// check that all arrays inside the contraction which use the shape c
+// have the same size.
+void verifyContractionShape(const Arr *c, Expr *inner) {
+    assert(c->sh.ndim == 0 && 
+            "c must be a scalar along which are contracting");
+    IndexingVisitor iv;
+    iv.visitExpr(inner);
+    map <int, set<Index *>> size2ix;
+
+    for(Index *e : iv.indexes) {
+
+        for(int i = 0; i < (int)e->ixs.size(); ++i) {
+            // this is not the index we are looking for
+            if (e->ixs[i] != c) continue;
+
+            // insert this size
+            size2ix[e->arr->sh[i]].insert(e);
+        }
+    }
+
+    // contracting over an expression with consistent sizes
+    if (size2ix.size() == 1) return;
+
+    // contracting over an expression with no array (a scalar, say).
+    // For example, after constant folding: (>< 0)
+    if(size2ix.size() == 0) return;
+
+
+    cerr << "*****Incorrect contraction sizes*****\n";
+    cerr << "e: " << inner->to_str_with_shape() << "\n";
+    for(auto it : size2ix) {
+        cerr << "size: " << it.first;
+        cerr << " | indexes: ";
+        for (Index *i : it.second) {
+            cerr << i->to_str() << " | ";
+        }
+        cerr << "\n";
+    }
+
+    assert(false && "inconsistent indexing with sizes");
+}
+
 void add_word_to_vocab(string w) {
     if (vocab.find(w) != vocab.end()) { return; }
     word2ix[w] = last_word_index;
@@ -1461,17 +1516,14 @@ Expr *l2(Arr *v, Arr *w) {
     return new Contract(c, new Mul(s, s));    
 }
 
-Expr *cell(Arr *I2H, Arr *H2H, Arr *i, Arr *h, Arr *ix) {
-    return new Tanh(new Add(matvecmul(I2H, i, ix), matvecmul(H2H, h, ix)));
-}
-
 struct ArrayGatherVisitor : public ExprVisitor {
     set<Arr *> arrays;
     Expr *visitArr(Arr *a) {
         arrays.insert(a);
-        return nullptr;
+        return a;
     }
 };
+
 
 // compute dy/dx
 /*
@@ -1668,6 +1720,12 @@ Expr* takeIndirectDerivatives(Program &p, Arr *y, Arr *x) {
     return allsum;
 }
 
+
+Expr *cell(Arr *I2H, Arr *H2H, Arr *i, Arr *h, Arr *ix) {
+    return new Tanh(new Add(matvecmul(I2H, i, ix), matvecmul(H2H, h, ix)));
+}
+
+
 void test_lstm() {
     static const int EMBEDSIZE = 5;
     static const int HIDDENSIZE = 10;
@@ -1683,14 +1741,14 @@ void test_lstm() {
     (void)(inputs);
 
     for(int i = 0; i < NINPUTS+1; ++i) {
-        hiddens[i] = new Arr("h" + to_string(i), EMBEDSIZE);
+        hiddens[i] = new Arr("h" + to_string(i), HIDDENSIZE);
     }
 
     Arr *ix = new Arr("ix");
 
-    Arr *I2H = new Arr("I2H", EMBEDSIZE, HIDDENSIZE);
+    Arr *I2H = new Arr("I2H", HIDDENSIZE, EMBEDSIZE);
     Arr *H2H = new Arr("H2H", HIDDENSIZE, HIDDENSIZE);
-    Arr *H2O = new Arr("H2O", HIDDENSIZE, EMBEDSIZE);
+    Arr *H2O = new Arr("H2O", EMBEDSIZE, HIDDENSIZE);
 
     Program p;
     IRBuilder builder(p);
