@@ -128,6 +128,26 @@ struct Shape {
         sh.vals[0] = size;
         return sh;
     }
+
+    // append another shape inside this shape. 
+    // So, 0..ndim will be this shape,
+    // ndim+1...ndim+ndim' will be next
+    Shape appendInside(Shape next) {
+        Shape sh;
+        sh.ndim = ndim + next.ndim;
+        assert(sh.ndim < MAXDIM);
+
+        int ix = 0;
+        for(int i = 0; i < ndim; ++i) {
+            sh.vals[ix++] = vals[i];
+        }
+
+        for(int i = 0; i < next.ndim; ++i) {
+            sh.vals[ix++] = next.vals[i];
+        }
+
+        return sh;
+    }
 };
 
 
@@ -195,6 +215,8 @@ struct ConstantInt : public Expr {
 };
 
 
+// TODO: we need some way for an Arr to decay into an Index gracefully?
+struct Index;
 struct Arr : public Expr {
     string name;
     Shape sh;
@@ -231,18 +253,21 @@ struct Arr : public Expr {
     Shape shape() const { return sh; }
 
     // helpers to index
-    Expr *ix(vector<const Arr *> ix);
-    Expr *ix(const Arr *ix1);
-    Expr *ix(const Arr *ix, const Arr *ix2);
+    Index *ix(vector<const Arr *> ix);
+    Index *ix();
+    Index *ix(const Arr *ix1);
+    Index *ix(const Arr *ix, const Arr *ix2);
 
 };
 
 string Expr::to_str_with_shape() const {
     string s = "";
-    s += "[";
+    s += "(size<";
     for(const Arr *i : free()) s += i->name + ",";
-    s += "]";
+    s += "> ";
     s += to_str();
+
+    s += ")";
     return s;
 }
 
@@ -470,9 +495,11 @@ struct Index : public Expr {
 
             // ensure that we are fully indexing the array.
             if((int)ixs.size() > arr->shape().ndim) {
-                cout << "array " << arr->to_str() << "| shape: " 
-                    << arr->shape().to_str() << " | nixs: " << ixs.size()
-                    << "\n";
+                cerr << "array " << arr->to_str() << "| shape: " 
+                    << arr->shape().to_str() << " | nixs: " << ixs.size();
+                cerr << "\nixs: ";
+                for (const Arr *a : ixs) cerr << a->name << " ";
+                cerr << "\n";
             };
             assert((int)ixs.size() <= arr->shape().ndim);
         }; 
@@ -530,15 +557,19 @@ struct Index : public Expr {
 
 
 
-Expr *Arr::ix(vector<const Arr*> ixs) {
+Index *Arr::ix(vector<const Arr*> ixs) {
     return new Index(this, ixs);
 }
 
-Expr *Arr::ix(const Arr* ix1) {
+Index *Arr::ix(const Arr* ix1) {
     return new Index(this, {ix1});
 }
 
-Expr *Arr::ix(const Arr* ix1, const Arr* ix2) {
+Index *Arr::ix() {
+    return new Index(this, {});
+}
+
+Index *Arr::ix(const Arr* ix1, const Arr* ix2) {
     return new Index(this, {ix1, ix2});
 }
 
@@ -566,7 +597,10 @@ struct Contract : public Expr {
     }
 
     Expr *subst(const Arr* old, const Arr* new_) const {
-        return new Contract(ix == old ? new_ : ix, inner);
+        // TODO: think about this carefully!
+        const bool shadowed = ix == old;
+        const Arr *newix = shadowed ? new_ : ix;
+        return new Contract(newix, inner->subst(old, new_));
     }
 
 };
@@ -673,7 +707,7 @@ struct Stmt {
     // return the RHS of the expression if the statement has it.
     // return nullptr otherwise;
     virtual void findArr(Arr *arr, Expr **arrptr)  = 0;
-    virtual std::map<Arr *, Expr *> arrays() = 0;
+    virtual std::map<Index *, Expr *> arrays() = 0;
 };
 
 template<typename T>
@@ -700,51 +734,54 @@ set<T> symmetricdifference(const set<T> &a, const set<T> &b) {
 
 struct Assign : public Stmt {
     AssignType type;
-    Arr *lhs;
-    vector<const Arr *> indeces;
+    Index *lhs;
+    // Arr *lhs;
+    // vector<const Arr *> indeces;
     Expr *rhs;
 
-    Assign(AssignType type, Arr *lhs, vector<const Arr *> indeces, Expr *rhs) 
-        : type(type), lhs(lhs), indeces(indeces), rhs(rhs) {
+    Assign(AssignType type, Index *lhs, Expr *rhs) 
+        : type(type), lhs(lhs), rhs(rhs) {
 
             // TODO: add an exhaustiveness check that the set of indeces
             // is equal to the set of free indeces.
 
+            /*
             for (const Arr * ix: indeces) {
                 assert(ix->sh.ndim == 0 && "can only index with zero dimensional arrays");
             }
+            */
 
             const set<const Arr *> free = rhs->free();
             if (type == AssignType::Reference) {
-                if (indeces.size() >= free.size()) {
+                if (lhs->ixs.size() >= free.size()) {
                     cerr << "Taking a slice of zero or negative dimension\n";
                     cerr << "\tlhs: " << lhs->to_str_with_shape() << "\n";
                     cerr << "\tindeces: ";
-                    for (const Arr *a : indeces) cerr << a->name << " ";
+                    for (const Arr *a : lhs->ixs) cerr << a->name << " ";
                     cerr << "\n\texpression: ";
                     cerr << rhs->to_str_with_shape() << "\n";
                 }
 
-                assert(indeces.size() < rhs->free().size());
+                assert(lhs->ixs.size() < rhs->free().size());
             } else {
-                if (free.size() != indeces.size()) {
+                if (free.size() != lhs->ixs.size()) {
                     cerr << "mismatch between indeces and number of free variables\n";
                     cerr << "\tlhs: " << lhs->to_str_with_shape() << "\n";
                     cerr << "\tindeces: ";
-                    for (const Arr *a : indeces) cerr << a->name << " ";
+                    for (const Arr *a : lhs->ixs) cerr << a->name << " ";
                     cerr << "\n\texpression: ";
                     cerr << rhs->to_str_with_shape() << "\n";
                 }
 
-                assert(free.size() == indeces.size() && 
+                assert(free.size() == lhs->ixs.size() && 
                         "need those many free variables as free indices");
 
                 set<const Arr *> symdiff = symmetricdifference(set<const
-                        Arr*>(indeces.begin(), indeces.end()), free);
+                        Arr*>(lhs->ixs.begin(), lhs->ixs.end()), free);
                 if (symdiff.size() != 0) {
                     cerr << "\tlhs: " << lhs->to_str_with_shape() << "\n";
                     cerr << "\tindeces: ";
-                    for (const Arr *a : indeces) cerr << a->name << " ";
+                    for (const Arr *a : lhs->ixs) cerr << a->name << " ";
                     cerr << "\n\texpression: ";
                     cerr << rhs->to_str_with_shape() << "\n";
 
@@ -754,7 +791,7 @@ struct Assign : public Stmt {
                     }
                     
                     cerr << "\nkeys not present in RHS: ";
-                    for (const Arr *a : indeces) {
+                    for (const Arr *a : lhs->ixs) {
                         if (symdiff.count(a)) cerr << a->name << " ";
                     }
                     cerr << "\n";
@@ -768,12 +805,8 @@ struct Assign : public Stmt {
         cout << string(depth, ' ');
 
         string s = "(";
-        s += lhs->name;
-        s += "[";
-        for (const Arr * ix: indeces) {
-            s += ix->name + ",";
-        }
-        s += "] ";
+        s += lhs->to_str();
+        s +=  " ";
 
         switch(type) {
             case AssignType::Copy: s += ":="; break;
@@ -787,11 +820,11 @@ struct Assign : public Stmt {
 
     virtual void findArr(Arr *arr, Expr **arrptr) {
         assert(arrptr);
-        if (arr == lhs) {  *arrptr = rhs; }
+        if (arr == lhs->arr) {  *arrptr = rhs; }
         else { *arrptr = nullptr; }
     }
 
-    std::map<Arr *, Expr *> arrays() {
+    std::map<Index *, Expr *> arrays() {
         return { {lhs, rhs}};
 
     }
@@ -817,10 +850,10 @@ struct Block : public Stmt {
         }
     }
 
-    std::map<Arr *, Expr *> arrays() {
-        std::map<Arr *, Expr *> m;
+    std::map<Index *, Expr *> arrays() {
+        std::map<Index *, Expr *> m;
         for(Stmt *s : stmts) {
-            std::map<Arr *, Expr *> sm = s->arrays();
+            std::map<Index *, Expr *> sm = s->arrays();
             m.insert(sm.begin(), sm.end());
         }
         return m;
@@ -847,7 +880,7 @@ struct Forall : public Stmt {
         return inner.findArr(arr, arrptr);
     }
 
-    std::map<Arr *, Expr *> arrays() {
+    std::map<Index *, Expr *> arrays() {
         return inner.arrays();
     }
 };
@@ -865,7 +898,7 @@ struct Program {
         return arrptr;
     }
 
-    std::map<Arr *, Expr *> arrays() {
+    std::map<Index *, Expr *> arrays() {
         return stmts.arrays();
     }
 };
@@ -889,23 +922,21 @@ struct IRBuilder {
         insertPoint = &f->inner;
     }
 
-    void copy(Arr *arr, vector<const Arr *> indeces, Expr *rhs) {
-        assert(arr != nullptr);
-        insertPoint->stmts.push_back(new Assign(AssignType::Copy, arr, indeces,
-                    rhs));
+    void copy(Index *ix, Expr *rhs) {
+        assert(ix != nullptr);
+        insertPoint->stmts.push_back(new Assign(AssignType::Copy, ix, rhs));
     }
 
-    void incr(Arr *arr, vector<const Arr *> indeces, Expr *rhs) {
-        assert(arr != nullptr && "creating an array");
-        insertPoint->stmts.push_back(new Assign(AssignType::Incr, arr, indeces,
-                    rhs));
+    void incr(Index *ix, Expr *rhs) {
+        assert(ix != nullptr && "creating an array");
+        insertPoint->stmts.push_back(new Assign(AssignType::Incr, ix, rhs));
     }
 
 
-    void reference(Arr *arr, vector<const Arr *> indeces, Expr *rhs) {
-        assert(arr != nullptr && "creating an array");
-        insertPoint->stmts.push_back(new Assign(AssignType::Reference, arr,
-                    indeces, rhs));
+    void reference(Index *ix, Expr *rhs) {
+        assert(ix != nullptr && "creating an array");
+        insertPoint->stmts.push_back(new Assign(AssignType::Reference, ix,
+                    rhs));
     }
 
     Forall *insertFor(const Arr* ix) {
@@ -1103,7 +1134,7 @@ struct FlattenVisitor : public ExprVisitor {
         vector<Expr *> inner;
         for(Expr *e : m->inner) {
             Mul *me = dynamic_cast<Mul *>(e);
-            if (!me) { inner.push_back(e); }
+            if (!me) { inner.push_back(visitExpr(e)); }
             else {
                 // copy everything from the inner multiplication
                 inner.insert(inner.end(), me->inner.begin(), me->inner.end());
@@ -1116,7 +1147,7 @@ struct FlattenVisitor : public ExprVisitor {
         vector<Expr *> inner;
         for(Expr *e : a->inner) {
             Add *ae = dynamic_cast<Add *>(e);
-            if (!ae) { inner.push_back(e); }
+            if (!ae) { inner.push_back(visitExpr(e)); }
             else {
                 // copy everything from the inner multiplication
                 inner.insert(inner.end(), ae->inner.begin(), ae->inner.end());
@@ -1298,18 +1329,18 @@ void test_program_dot() {
     Arr *dot = new Arr("dot");
     Arr *i = new Arr("i");
     Arr *k = new Arr("k");
-    builder.copy(dot, {}, new Contract(i, new Mul(a->ix(i), b->ix(i))));
-    builder.copy(grada,{k}, 
+    builder.copy(dot->ix(), new Contract(i, new Mul(a->ix(i), b->ix(i))));
+    builder.copy(grada->ix(k),
             new Mul(new ConstantFloat(1e-2), 
                 p[dot]->grad("a", {k})->normalize()));
-    builder.copy(gradb, {k}, 
+    builder.copy(gradb->ix(k),
             new Mul(new ConstantFloat(1e-2),
                p[dot]->grad("b", {k})->normalize()));
 
     // Incr is weird, since we should probably be the ones doing the
     // indexing...
-    builder.incr(a, {k}, grada->ix(k));
-    builder.incr(b, {k}, gradb->ix(k));
+    builder.incr(a->ix(k), grada->ix(k));
+    builder.incr(b->ix(k), gradb->ix(k));
 
     cout << "*****program dot*****\n";
     cout << p.to_str();
@@ -1334,14 +1365,14 @@ void test_program_dot_batched() {
     Expr *dots = new Contract(i, new Mul(focuses->ix(bi, i), ctxes->ix(bi, i)));
     Expr *losses = new Sub(new ConstantInt(1), dots);
 
-    builder.copy(total_loss, {}, new Contract(bi, losses));
+    builder.copy(total_loss->ix(), new Contract(bi, losses));
 
     Expr *lr = new ConstantFloat(1e-2);
 
     Arr *dbi = new Arr("dbi"), *dk = new Arr("dk");
-    builder.incr(focuses, {dbi, dk},
+    builder.incr(focuses->ix(dbi, dk),
         new Mul (lr, p[total_loss]->grad("focuses", {dbi, dk})->normalize()));
-    builder.incr(ctxes, {dbi, dk},
+    builder.incr(ctxes->ix(dbi, dk),
         new Mul (lr, p[total_loss]->grad("ctxes", {dbi, dk})->normalize()));
 
     cout << "*****program batched dot*****\n";
@@ -1370,17 +1401,17 @@ void test_program_dot_batched_indirect() {
     Forall *forbi = builder.insertFor(bi);
     builder.setInsertPoint(forbi);
     
-    builder.reference(focus, {i}, focuses->ix(bi, i));
-    builder.reference(ctx, {i}, ctxes->ix(bi, i));
+    builder.reference(focus->ix(i), focuses->ix(bi, i));
+    builder.reference(ctx->ix(i), ctxes->ix(bi, i));
 
-    builder.copy(dot, {}, new Contract(i, new Mul(focus->ix(i), ctx->ix(i))));
-    builder.copy(loss, {}, new Sub(new ConstantInt(1), p[dot]));
+    builder.copy(dot->ix(), new Contract(i, new Mul(focus->ix(i), ctx->ix(i))));
+    builder.copy(loss->ix(), new Sub(new ConstantInt(1), p[dot]));
 
     Expr *lr = new ConstantFloat(1e-2);
 
-    builder.incr(focus, {k},
+    builder.incr(focus->ix(k),
         new Mul (lr, p[loss]->grad("focus", {k})->normalize()));
-    builder.incr(ctx, {k},
+    builder.incr(ctx->ix(k),
             new Mul (lr, p[loss]->grad("ctx", {k})->normalize()));
     cout << p.to_str();
 }
@@ -1404,18 +1435,17 @@ void test_program_dot_indicrect() {
     IRBuilder builder(p);
     
 
-    builder.reference(focus, {i},  embeds->ix(focusix, i));
-    builder.reference(ctx, {i}, embeds->ix(ctxix, i));
+    builder.reference(focus->ix(i),  embeds->ix(focusix, i));
+    builder.reference(ctx->ix(i), embeds->ix(ctxix, i));
 
-    builder.copy(dot, {}, new Contract(i, new Mul(focus->ix(i), ctx->ix(i))));
-    builder.copy(loss, {}, new Sub(new ConstantInt(1), p[dot]));
-
+    builder.copy(dot->ix(), new Contract(i, new Mul(focus->ix(i), ctx->ix(i))));
+    builder.copy(loss->ix(), new Sub(new ConstantInt(1), p[dot]));
 
     Expr *lr = new ConstantFloat(1e-2);
 
-    builder.incr(focus, {k}, 
+    builder.incr(focus->ix(k),
         new Mul (lr, p[loss]->grad("focus", {k})->normalize()));
-    builder.incr(ctx, {k}, 
+    builder.incr(ctx->ix(k),
             new Mul (lr, p[loss]->grad("ctx", {k})->normalize()));
     cout << p.to_str();
 }
@@ -1435,9 +1465,19 @@ Expr *cell(Arr *I2H, Arr *H2H, Arr *i, Arr *h, Arr *ix) {
     return new Tanh(new Add(matvecmul(I2H, i, ix), matvecmul(H2H, h, ix)));
 }
 
+struct ArrayGatherVisitor : public ExprVisitor {
+    set<Arr *> arrays;
+    Expr *visitArr(Arr *a) {
+        arrays.insert(a);
+        return nullptr;
+    }
+};
+
 // compute dy/dx
+/*
 Expr *gradProgram(Program &p, Expr *y, Arr *x) {
-    const map<Arr *, Expr *> arr2expr = p.arrays();
+    const map<Index *, Expr *> ix2expr = p.arrays();
+    const map<Arr *, Expr *> arr2expr;
 
     // if we have l in the program, then recursively grad the expression
     Arr *a = dynamic_cast<Arr *>(y);
@@ -1464,13 +1504,6 @@ Expr *gradProgram(Program &p, Expr *y, Arr *x) {
 
 }
 
-struct ArrayGatherVisitor : public ExprVisitor {
-    set<Arr *> arrays;
-    Expr *visitArr(Arr *a) {
-        arrays.insert(a);
-        return nullptr;
-    }
-};
 
 // take the derivatives of this expression with all arrays in "params"
 // that occur directly within it
@@ -1494,6 +1527,7 @@ void takeDirectDerivatives(Program &p, Expr *e, string name, set<const Arr*> par
     }
 
 }
+*/
 
 
 // get all paths from a source node to a target node, _backwards_. 
@@ -1539,31 +1573,64 @@ set<std::vector<Arr *>> getPathsToArr(Program &p, Arr *cur, Arr *target, set<vec
 // TODO: keep a map of dy/dx -> array holding this value
 
 Expr* takeIndirectDerivatives(Program &p, Arr *y, Arr *x) {
-
-
     IRBuilder builder(p);
     set<vector<Arr *>> yTox = getPathsToArr(p, y, x, {{y}});
+
+    // the arrays that occurs along the path of the derivative
+    set<Arr *> das;
+
+    for(vector<Arr *> path : yTox) {
+        das.insert(path.begin(), path.end());
+    }
 
     
     // these are the canonical indeces for the array when we want to
     // index into that array as the LHS.
-    map<const Arr *, Index *> arr2slice;
+    map<const Arr *, Index *> a2ix;
 
-    for(vector<Arr *> path : yTox) {
-        vector<const Arr *> indeces;
-
-        // have already seen this array
-        for(Arr *a : path) {
-            if (arr2slice.find(a) != arr2slice.end()) continue;
-
-            // have not seen the array, create indeces for it.
-            vector<const Arr *> sliceIxs;
-            for(int i = 0; i < a->sh.ndim; ++i) {
-                const string ixname = a->name + "_" +  to_string(i);
-                sliceIxs.push_back(new Arr(ixname));
-            }
-            arr2slice[a] = new Index(a, sliceIxs);
+    for(Arr *a : das) {
+        // have not seen the array, create indeces for it.
+        vector<const Arr *> ixs;
+        for(int i = 0; i < a->sh.ndim; ++i) {
+            const string ixname = a->name + "_" +  to_string(i);
+            ixs.push_back(new Arr(ixname));
         }
+        a2ix[a] = new Index(a, ixs);
+
+
+        cout << "replaced: " << a->to_str() << 
+            "| riendexed: " << a2ix[a]->to_str() << "\n";
+    }
+
+    // these are the canonical expression for an array, which we
+    // have re-indexed.
+    map<const Arr *, Expr *> a2v;
+    for (auto it : p.arrays()) {
+        Index *lhs = it.first;
+        assert(lhs);
+
+        Index *lhsReindexed = a2ix[it.first->arr];
+        assert(lhsReindexed);
+
+        assert(lhsReindexed->arr == lhs->arr);
+
+        Expr *rhs = it.second;
+
+        assert(lhs->ixs.size() == lhsReindexed->ixs.size());
+        cout << "Reindexing " <<it.first->arr->name << ":";
+        for (int i = 0; i < (int)lhs->ixs.size(); ++i) {
+            cout << "\n\t" << lhs->ixs[i]->name << " => " << lhsReindexed->ixs[i]->name;
+            cout << "\n\told: " << rhs->to_str(); 
+            rhs = rhs->subst(lhs->ixs[i], lhsReindexed->ixs[i]);
+            cout << "\n\tnew: " << rhs->to_str(); 
+        }
+        cout << "\n";
+
+        a2v[lhs->arr]  = rhs;
+        
+        cout << "replaced: " << lhs->arr->to_str() << 
+            "\n\trhs: " << rhs->to_str() << 
+            "\n\trhs': " << a2v[lhs->arr]->to_str() << "\n";
     }
 
 
@@ -1574,25 +1641,27 @@ Expr* takeIndirectDerivatives(Program &p, Arr *y, Arr *x) {
         Expr *chainprod = new ConstantInt(1);
         for(int i = 0; i < (int)path.size() - 1; ++i) {
 
-            Expr *rhs = p[path[i]];
+            Expr *rhs = a2v[path[i]];
             if (!rhs) continue;
 
             // take the derivative (y3/y2)
-            Expr *der = rhs->grad(path[i+1]->name, arr2slice[path[i+1]]->ixs)->normalize();
+            Expr *der = rhs->grad(path[i+1]->name, a2ix[path[i+1]]->ixs)->normalize();
             vector<const Arr *> derIndeces;
 
             // insert all indeces from the array at path[i], path[i+1]
             derIndeces.insert(derIndeces.end(),
-                    arr2slice[path[i]]->ixs.begin(), 
-                    arr2slice[path[i]]->ixs.end());
+                    a2ix[path[i]]->ixs.begin(), 
+                    a2ix[path[i]]->ixs.end());
 
             derIndeces.insert(derIndeces.end(),
-                    arr2slice[path[i+1]]->ixs.begin(), 
-                    arr2slice[path[i+1]]->ixs.end());
+                    a2ix[path[i+1]]->ixs.begin(), 
+                    a2ix[path[i+1]]->ixs.end());
 
-            Arr *arrder = new Arr("d" + path[i]->name + "_" + "d" + path[i+1]->name);
-            builder.copy(arrder, derIndeces, der);
-            // chainprod = new Mul(chainprod, arrder);
+            Arr *arrder = 
+                new Arr("d" + path[i]->name + "_" + "d" + path[i+1]->name,
+                        path[i]->sh.appendInside(path[i+1]->sh));
+            builder.copy(arrder->ix(derIndeces), der);
+            chainprod = new Mul(chainprod, arrder);
         }
         allsum = new Add(allsum, chainprod);
     }
@@ -1628,17 +1697,17 @@ void test_lstm() {
 
     Arr *hprev = hiddens[0];
     for(int i = 0; i < NINPUTS; ++i) {
-        builder.copy(hiddens[i+1], {ix}, cell(I2H, H2H, inputs[i], hprev, ix)); //new Tanh(matvecmul(H2H, hprev, ix)));
+        builder.copy(hiddens[i+1]->ix(ix), cell(I2H, H2H, inputs[i], hprev, ix)); //new Tanh(matvecmul(H2H, hprev, ix)));
         hprev = hiddens[i+1];
     }
 
     Arr *predict = new Arr("p", EMBEDSIZE);
-    builder.copy(predict, {ix}, matvecmul(H2O, hprev, ix));
+    builder.copy(predict->ix(ix), matvecmul(H2O, hprev, ix));
 
 
     Arr *output = new Arr("o", EMBEDSIZE);
     Arr *loss = new Arr("l");
-    builder.copy(loss, {}, l2(output, predict));
+    builder.copy(loss->ix(), l2(output, predict));
 
     cout << "*****LSTM*****:\n";
     cout << p.to_str();
@@ -1712,13 +1781,13 @@ int main(int argc, char **argv) {
         cout << "\n";
     }
 
-    test_expr_dot();
-    test_expr_matvec();
-    test_expr_tanh();
-    test_program_dot();
-    test_program_dot_batched();
-    test_program_dot_indicrect();
-    test_program_dot_batched_indirect();
+    // test_expr_dot();
+    // test_expr_matvec();
+    // test_expr_tanh();
+    // test_program_dot();
+    // test_program_dot_batched();
+    // test_program_dot_indicrect();
+    // test_program_dot_batched_indirect();
 
     test_lstm();
 }
