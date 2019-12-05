@@ -166,7 +166,9 @@ struct Expr {
     virtual Expr *subst(const Arr* old, const Arr* new_) const = 0;
 
     // creates dirac deltas by taking gradients
-    virtual Expr *grad(string name, vector<const Arr *> ixs) = 0;
+    virtual Expr *grad_(string name, vector<const Arr *> ixs) = 0;
+
+    Expr *grad(string name, vector<const Arr *> ixs);
 
     string to_str_with_shape() const;
 
@@ -182,7 +184,7 @@ struct ConstantInt : public Expr {
 
     string to_str() const { return std::to_string(i); }
     set<const Arr *> free() const { return {}; }
-    Expr *grad(string name, vector<const Arr *> ixs) { 
+    Expr *grad_(string name, vector<const Arr *> ixs) { 
         return new ConstantInt(0);
     }
 
@@ -211,7 +213,7 @@ struct Arr : public Expr {
         return set<const Arr *>();
     }
 
-    Expr *grad(string garr, vector<const Arr *> ixs) {
+    Expr *grad_(string garr, vector<const Arr *> ixs) {
         // if we ever get here, then we should be 0-dimensional
         assert(ixs.size() == 0);
         if (garr == name) { return new ConstantInt(1); };
@@ -239,10 +241,27 @@ string Expr::to_str_with_shape() const {
     string s = "";
     s += "[";
     for(const Arr *i : free()) s += i->name + ",";
-    s += "] ";
+    s += "]";
     s += to_str();
     return s;
 }
+
+
+
+Expr *Expr::grad(string name, vector<const Arr *> ixs) {
+    set<string> freeNames;
+    for (const Arr *f : this->free()) { 
+        freeNames.insert(f->name);
+    }
+    for(const Arr * ix : ixs) {
+        if (freeNames.count(ix->name)) {
+            cerr << "\nreused name for gradient index: " << ix->name << "\n";
+            assert(false && "gradient indexing names must be fresh");
+        }
+    }
+
+    return grad_(name, ixs);
+};
 
 
 
@@ -252,7 +271,7 @@ struct ConstantFloat : public Expr {
 
     string to_str() const { return std::to_string(f); }
     set<const Arr*> free() const { return {}; }
-    Expr *grad(string name, vector<const Arr*> ixs) { 
+    Expr *grad_(string name, vector<const Arr*> ixs) { 
         return new ConstantInt(0);
     }
 
@@ -282,7 +301,7 @@ struct Delta : public Expr {
         return {old, new_};
     }
 
-    Expr *grad(string arr, vector<const Arr*> ixs) {
+    Expr *grad_(string arr, vector<const Arr*> ixs) {
         return new ConstantInt(0);
     };
 
@@ -335,7 +354,7 @@ struct Add : public Expr {
         return f;
     }
 
-    Expr *grad(string name, vector<const Arr*> ixs) {
+    Expr *grad_(string name, vector<const Arr*> ixs) {
         vector<Expr *>dinner;
         for(Expr *e : inner) {
             dinner.push_back(e->grad(name, ixs));
@@ -371,7 +390,7 @@ struct Sub : public Expr {
         return f;
     }
 
-    Expr *grad(string name, vector<const Arr*> ixs) {
+    Expr *grad_(string name, vector<const Arr*> ixs) {
         return new Sub(l->grad(name, ixs), r->grad(name, ixs));
     }
 
@@ -400,6 +419,7 @@ struct Mul : public Expr {
             s += inner[i]->to_str();
             s += (i < (int)inner.size() - 1 ? " " : "");
         }
+        s += ")";
         return s;
     }
 
@@ -413,7 +433,7 @@ struct Mul : public Expr {
         return f;
     }
 
-    Expr *grad(string name, vector<const Arr*> ixs) {
+    Expr *grad_(string name, vector<const Arr*> ixs) {
 
         // d(fgh) = df gh + f dg h + fg dh
         vector<Expr *> dsum;
@@ -474,7 +494,7 @@ struct Index : public Expr {
         return s;
     }
 
-    Expr *grad(string name, vector<const Arr*> gixs) {
+    Expr *grad_(string name, vector<const Arr*> gixs) {
         // can only take gradients if the slice is fully saturated
         assert((int)ixs.size() == arr->shape().ndim);
 
@@ -540,7 +560,7 @@ struct Contract : public Expr {
         return infree;
     }
 
-    Expr *grad(string name, vector<const Arr*> ixs) {
+    Expr *grad_(string name, vector<const Arr*> ixs) {
         return new Contract(ix, inner->grad(name, ixs));
     }
 
@@ -572,7 +592,7 @@ struct Tanh : public Expr {
         return new Tanh(inner->subst(old, new_));
     }
 
-    Expr *grad(string name, vector<const Arr*> ixs) {
+    Expr *grad_(string name, vector<const Arr*> ixs) {
         Expr *dtan = new Sub(new ConstantInt(1), new Mul(new Tanh(inner), new
                     Tanh(inner)));
         Expr *dinner = inner->grad(name, ixs);
@@ -658,20 +678,46 @@ struct Stmt {
 struct Assign : public Stmt {
     AssignType type;
     Arr *lhs;
+    vector<const Arr *> indeces;
     Expr *rhs;
 
-    Assign(AssignType type, Arr *lhs, Expr *rhs) : type(type), lhs(lhs), rhs(rhs) {};
+    Assign(AssignType type, Arr *lhs, vector<const Arr *> indeces, Expr *rhs) 
+        : type(type), lhs(lhs), indeces(indeces), rhs(rhs) {
+            for (const Arr * ix: indeces) {
+                assert(ix->sh.ndim == 0);
+            }
+
+            if (rhs->free().size() != indeces.size()) {
+                cerr << "mismatch between indeces and number of free variables\n";
+                cerr << "\tlhs: " << lhs->to_str_with_shape() << "\n";
+                cerr << "\tindeces: ";
+                for (const Arr *a : indeces) cerr << a->name << " ";
+                cerr << "\n\texpression: ";
+                cerr << rhs->to_str_with_shape() << "\n";
+            }
+            assert(rhs->free().size() == indeces.size() && 
+                    "need those many free variables as free indices");
+        };
 
     string to_str(int depth) const {
+        cout << string(depth, ' ');
 
-        string eqname = "";
-        switch(type) {
-            case AssignType::Copy: eqname = ":="; break;
-            case AssignType::Reference: eqname = "&="; break;
-            case AssignType::Incr: eqname = "+="; break;
+        string s = "(";
+        s += lhs->name;
+        s += "[";
+        for (const Arr * ix: indeces) {
+            s += ix->name + ",";
         }
-        return "(" + lhs->to_str() + " " + eqname + " " +
-            rhs->to_str_with_shape() + ")";
+        s += "] ";
+
+        switch(type) {
+            case AssignType::Copy: s += ":="; break;
+            case AssignType::Reference: s += "&="; break;
+            case AssignType::Incr: s += "+="; break;
+        }
+
+        s += " " + rhs->to_str_with_shape() + ")";
+        return s;
     }
 
     virtual void findArr(Arr *arr, Expr **arrptr) {
@@ -778,20 +824,23 @@ struct IRBuilder {
         insertPoint = &f->inner;
     }
 
-    void copy(Arr *arr, Expr *rhs) {
+    void copy(Arr *arr, vector<const Arr *> indeces, Expr *rhs) {
         assert(arr != nullptr);
-        insertPoint->stmts.push_back(new Assign(AssignType::Copy, arr, rhs));
+        insertPoint->stmts.push_back(new Assign(AssignType::Copy, arr, indeces,
+                    rhs));
     }
 
-    void incr(Arr *arr, Expr *rhs) {
+    void incr(Arr *arr, vector<const Arr *> indeces, Expr *rhs) {
         assert(arr != nullptr && "creating an array");
-        insertPoint->stmts.push_back(new Assign(AssignType::Incr, arr, rhs));
+        insertPoint->stmts.push_back(new Assign(AssignType::Incr, arr, indeces,
+                    rhs));
     }
 
 
-    void reference(Arr *arr, Expr *rhs) {
+    void reference(Arr *arr, vector<const Arr *> indeces, Expr *rhs) {
         assert(arr != nullptr && "creating an array");
-        insertPoint->stmts.push_back(new Assign(AssignType::Reference, arr, rhs));
+        insertPoint->stmts.push_back(new Assign(AssignType::Reference, arr,
+                    indeces, rhs));
     }
 
     Forall *insertFor(const Arr* ix) {
@@ -874,7 +923,7 @@ struct ConstantFoldVisitor : ExprVisitor {
         // => (* x[j] -1)
         inner.clear();
         for(Expr *e : m->inner) {
-            cout << "inspecting: " << m->to_str() << " | " << e->to_str() << "\n";
+            // cout << "inspecting: " << m->to_str() << " | " << e->to_str() << "\n";
             if(auto *s = dynamic_cast<Sub *>(e)) {
                 if (is_const_zero(s->l)) {
                     inner.push_back(new ConstantInt(-1));
@@ -1102,46 +1151,38 @@ void test_expr_dot() {
     Expr *mul = new Mul(a->ix(i), b->ix(i));
     Expr *dot = new Contract(i, mul);
 
-    cout << "***dot***\n";
+    cout << "******dot******\n";
     cout << dot->to_str_with_shape() << "\n";
     Arr* k = new Arr("k");
     Expr *grad = dot->grad("a", {k});
     cout << "## dot->grad[a k]: ##\n\t" << grad->to_str_with_shape() << "\n";
-    simplify(grad, true);
+    cout << "## dot->grad[a k](normalized): ##\n\t" << 
+        grad->normalize()->to_str_with_shape() << "\n";
 }
-
-// contract over all free indeces
-Expr* contractOverFree(Expr *e) {
-    set<const Arr*> free = e->free();
-    for(const Arr* ix : free) {
-        e = new Contract(ix, e);
-    }
-    return e;
-}
-
 void test_expr_matvec() {
     const int NOUT = 3;
     const int NIN = 3;
-    Arr *a = new Arr("a", NOUT, NIN);
-    Arr *b = new Arr("b", NIN);
+    Arr *m = new Arr("m", NOUT, NIN);
+    Arr *v = new Arr("v", NIN);
     Arr* i = new Arr("i"), *j = new Arr("j");
-    Expr *mul = new Mul(a->ix(i, j), b->ix(j));
+    Expr *mul = new Mul(m->ix(i, j), v->ix(j));
     Expr *matvec = new Contract(j, mul);
 
-    cout << "***mul***\n";
+    cout << "******Mat @ vec******\n";
     cout << matvec->to_str_with_shape() << "\n";
 
 
     // before we can take the gradient, we need to put a sum over all
     // free parameters
-    Expr *grada = contractOverFree(matvec)->grad("a", 
-            {new Arr("k"), new Arr("l")});
-    cout << "## mul->grad[a k l]: ##\n\t" << grada->to_str() << "\n";
-    simplify(grada, true);
+    Expr *gradm = matvec->grad("m", {new Arr("d0"), new Arr("d1")});
+    cout << "## mul->grad[a d0 d1]: ##\n\t" << gradm->to_str() << "\n";
+    cout << "## mul->grad[a d0 d1](normalized): ##\n\t" <<
+        gradm->normalize()->to_str_with_shape() << "\n";
 
-    Expr *gradb = contractOverFree(matvec)->grad("b", {new Arr("k")});
-    cout << "## mul->grad[b k]: ##\n\t" << gradb->to_str() << "\n";
-    simplify(gradb, true);
+    Expr *gradv = matvec->grad("v", {new Arr("d0")});
+    cout << "## mul->grad[v d0]: ##\n\t" << gradv->to_str_with_shape() << "\n";
+    cout << "## mul->grad[v d0](normalized): ##\n\t" <<
+        gradv->normalize()->to_str_with_shape() << "\n";
 }
 
 void test_expr_tanh() {
@@ -1152,21 +1193,17 @@ void test_expr_tanh() {
     Expr *aixed = a->ix(i, j);
     Expr *matvec = new Tanh(aixed);
 
-    cout << "***tanh on matrix***\n";
+    cout << "*****tanh on matrix*****\n";
     cout << matvec->to_str_with_shape() << "\n";
 
 
     // before we can take the gradient, we need to put a sum over all
     // free parameters
-    Expr *grada = contractOverFree(matvec)->grad("a", 
+    Expr *grada = matvec->grad("a", 
             {new Arr("k"), new Arr("l")});
-    cout << "## mul->grad[a k l]: ##\n\t" << grada->to_str() << "\n";
-    simplify(grada, true);
-
-    // Expr *gradb = contractOverFree(matvec)->grad("b", {Index("k")});
-    // cout << "## mul->grad[b k]: ##\n\t" << gradb->to_str() << "\n";
-    // simplify(gradb);
-
+    cout << "## mul->grad[a k l]: ##\n\t" << grada->to_str_with_shape() << "\n";
+    cout << "## mul->grad[a k l](normalized): ##\n\t" << 
+        grada->normalize()->to_str_with_shape() << "\n";
 }
 
 // construct Dot using program
@@ -1182,21 +1219,24 @@ void test_program_dot() {
     Arr *dot = new Arr("dot");
     Arr *i = new Arr("i");
     Arr *k = new Arr("k");
-    builder.copy(dot, new Contract(i, new Mul(a->ix(i), b->ix(i))));
-    builder.copy(grada, 
+    builder.copy(dot, {}, new Contract(i, new Mul(a->ix(i), b->ix(i))));
+    builder.copy(grada,{k}, 
             new Mul(new ConstantFloat(1e-2), 
                 p[dot]->grad("a", {k})->normalize()));
-    builder.copy(gradb, 
+    builder.copy(gradb, {k}, 
             new Mul(new ConstantFloat(1e-2),
                p[dot]->grad("b", {k})->normalize()));
 
-    builder.incr(a, grada);
-    builder.incr(b, gradb);
+    // Incr is weird, since we should probably be the ones doing the
+    // indexing...
+    builder.incr(a, {k}, grada->ix(k));
+    builder.incr(b, {k}, gradb->ix(k));
 
-    cout << "***program dot**\n";
+    cout << "*****program dot*****\n";
     cout << p.to_str();
 }
 
+/*
 void test_dot_batched() {
     cout << "*****program batched dot*****\n";
     static const int BATCHSIZE = 10;
@@ -1372,19 +1412,19 @@ void takeDirectDerivatives(Program &p, Expr *e, string name, set<const Arr*> par
     ArrayGatherVisitor agv;
     agv.visitExpr(e);
 
+
     IRBuilder builder(p);
     for(Arr *a : agv.arrays) {
         if (params.find(a) == params.end()) continue;
 
         vector<const Arr *> ixs;
-        for (int i = 0; i < a->sh.ndim; ++i)
-            ixs.push_back(new Arr("i" + to_string(i)));
-        builder.copy(new Arr("d" + name + "_d" + a->name), 
-                e->grad(a->name, ixs)->normalize());
+        for (int i = 0; i < a->sh.ndim; ++i) {
+            ixs.push_back(new Arr("d" + to_string(i)));
+        }
 
-        cout << "\n\n";
-        simplify(e->grad(a->name, ixs), true);
-        cout << "\n\n";
+        Expr *grad = e->grad(a->name, ixs);
+        cout << "d" << name << "/d" << a->name << ":\n\t" << grad->to_str_with_shape() << "\n";
+        builder.copy(new Arr("d" + name + "_d" + a->name), grad->normalize());
     }
 
 }
@@ -1406,15 +1446,15 @@ set<std::vector<Arr *>> getPathsToArr(Program &p, Arr *cur, Arr *target, set<vec
     ArrayGatherVisitor agv;
     Expr *rhs = p[cur];
 
-    cout << "rhs for " << cur->name << " : " << (rhs ? rhs->to_str() : "NULL") << "\n";
+    // cout << "rhs for " << cur->name << " : " << (rhs ? rhs->to_str() : "NULL") << "\n";
     if (!rhs) { return {}; }
 
     // look in the RHS of this array
     agv.visitExpr(rhs);
 
-    cout << "arrays for |" << cur->name << "| := |"  << rhs->to_str() << "|";
-    for(Arr *a : agv.arrays) cout << a->name << " ";
-    cout << "|\n";
+    // cout << "arrays for |" << cur->name << "| := |"  << rhs->to_str() << "|";
+    // for(Arr *a : agv.arrays) cout << a->name << " ";
+    // cout << "|\n";
 
     set<vector<Arr *>> ps;
     for (Arr *child : agv.arrays) { 
@@ -1463,7 +1503,7 @@ Expr* takeIndirectDerivatives(Program &p, Arr *y, Arr *x, map<pair<Arr *, Arr*>,
 void test_lstm() {
     static const int EMBEDSIZE = 5;
     static const int HIDDENSIZE = 10;
-    static const int NINPUTS = 2;
+    static const int NINPUTS = 1;
 
     Arr *inputs[NINPUTS];
     Arr *hiddens[NINPUTS+1];
@@ -1504,12 +1544,16 @@ void test_lstm() {
     cout << "*****LSTM*****:\n";
     cout << p.to_str();
 
-    cout << "\n\t|" << p[loss]->grad("H2H", {new Arr("i'"), new Arr("j'")})->normalize()->to_str_with_shape() << "|\n";
-
+    // cout << "dl_dH2H: |" << p[loss]->grad("H2H", {new Arr("i'"), new Arr("j'")})->normalize()->to_str_with_shape() << "|\n";
+    // cout << "dl_dH2H: |" << p[loss]->grad("H2H", {new Arr("i'"), new Arr("j'")})->normalize()->to_str_with_shape() << "|\n";
     takeDirectDerivatives(p, p[loss], "l", {predict});
+    takeDirectDerivatives(p, p[hiddens[1]], "h1", {H2H});
 
-    cout << p.to_str();
 
+
+    map<pair<Arr *, Arr *>, Arr*> ders;
+    Expr *finalDer = takeIndirectDerivatives(p, loss, H2H, ders);
+    builder.copy(new Arr("dl/dH2H"), finalDer->normalize());
 
     cout << "\n\n paths from loss to H2H:\n";
     set<vector<Arr *>> paths = getPathsToArr(p, loss, H2H, {{loss}});
@@ -1521,14 +1565,15 @@ void test_lstm() {
         cout << "\n";
     }
 
-    map<pair<Arr *, Arr *>, Arr*> ders;
-    Expr *finalDer = takeIndirectDerivatives(p, loss, H2H, ders);
-    builder.copy(new Arr("dloss_dH2H"), finalDer->normalize());
+    // map<pair<Arr *, Arr *>, Arr*> ders;
+    // Expr *finalDer = takeIndirectDerivatives(p, loss, H2H, ders);
+    // builder.copy(new Arr("dloss_dH2H"), finalDer->normalize());
 
 
     cout << "*****LSTM(full)*****:\n";
     cout << p.to_str();
 }
+*/
 
 
 
@@ -1567,16 +1612,13 @@ int main(int argc, char **argv) {
         cout << "\n";
     }
 
-    // use_expr();
     test_expr_dot();
     test_expr_matvec();
     test_expr_tanh();
     test_program_dot();
-    test_dot_batched();
-    test_dot_indirect();
-    test_dot_batched_indirect();
+    // test_dot_batched();
+    // test_dot_indirect();
+    // test_dot_batched_indirect();
 
-    test_lstm();
-
-    // test_expr_rnn_batched();
+    // test_lstm();
 }
