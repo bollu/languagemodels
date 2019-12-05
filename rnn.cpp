@@ -676,6 +676,28 @@ struct Stmt {
     virtual std::map<Arr *, Expr *> arrays() = 0;
 };
 
+template<typename T>
+set<T> subtract(const set<T> &a, const set<T> &b) {
+    set<T> d;
+    for(T t : a) {
+        if (!b.count(t)) {
+            d.insert(t);
+        }
+    }
+    return d;
+}
+// (a - b) U (b - a)
+template<typename T>
+set<T> symmetricdifference(const set<T> &a, const set<T> &b) {
+    set<T> d;
+    set<T> dab = subtract(a, b);
+    d.insert(dab.begin(), dab.end());
+
+    set<T> dba = subtract(b, a);
+    d.insert(dba.begin(), dba.end());
+    return d;
+}
+
 struct Assign : public Stmt {
     AssignType type;
     Arr *lhs;
@@ -689,11 +711,12 @@ struct Assign : public Stmt {
             // is equal to the set of free indeces.
 
             for (const Arr * ix: indeces) {
-                assert(ix->sh.ndim == 0);
+                assert(ix->sh.ndim == 0 && "can only index with zero dimensional arrays");
             }
 
+            const set<const Arr *> free = rhs->free();
             if (type == AssignType::Reference) {
-                if (indeces.size() >= rhs->free().size()) {
+                if (indeces.size() >= free.size()) {
                     cerr << "Taking a slice of zero or negative dimension\n";
                     cerr << "\tlhs: " << lhs->to_str_with_shape() << "\n";
                     cerr << "\tindeces: ";
@@ -704,7 +727,7 @@ struct Assign : public Stmt {
 
                 assert(indeces.size() < rhs->free().size());
             } else {
-                if (rhs->free().size() != indeces.size()) {
+                if (free.size() != indeces.size()) {
                     cerr << "mismatch between indeces and number of free variables\n";
                     cerr << "\tlhs: " << lhs->to_str_with_shape() << "\n";
                     cerr << "\tindeces: ";
@@ -713,8 +736,31 @@ struct Assign : public Stmt {
                     cerr << rhs->to_str_with_shape() << "\n";
                 }
 
-                assert(rhs->free().size() == indeces.size() && 
+                assert(free.size() == indeces.size() && 
                         "need those many free variables as free indices");
+
+                set<const Arr *> symdiff = symmetricdifference(set<const
+                        Arr*>(indeces.begin(), indeces.end()), free);
+                if (symdiff.size() != 0) {
+                    cerr << "\tlhs: " << lhs->to_str_with_shape() << "\n";
+                    cerr << "\tindeces: ";
+                    for (const Arr *a : indeces) cerr << a->name << " ";
+                    cerr << "\n\texpression: ";
+                    cerr << rhs->to_str_with_shape() << "\n";
+
+                    cerr << "\nkeys not present in LHS: ";
+                    for (const Arr *a : free) {
+                        if (symdiff.count(a)) cerr << a->name << " ";
+                    }
+                    
+                    cerr << "\nkeys not present in RHS: ";
+                    for (const Arr *a : indeces) {
+                        if (symdiff.count(a)) cerr << a->name << " ";
+                    }
+                    cerr << "\n";
+
+                }
+                assert(symdiff.size() == 0 && "index set and free variable set are not equal");
             }
         };
 
@@ -1491,10 +1537,35 @@ set<std::vector<Arr *>> getPathsToArr(Program &p, Arr *cur, Arr *target, set<vec
 
 // compute dy/dx, through any chain of expressions needed.
 // TODO: keep a map of dy/dx -> array holding this value
-Expr* takeIndirectDerivatives(Program &p, Arr *y, Arr *x, map<pair<Arr *, Arr*>, Arr*> &ders) {
-    (void) ders;
+
+Expr* takeIndirectDerivatives(Program &p, Arr *y, Arr *x) {
+
+
     IRBuilder builder(p);
     set<vector<Arr *>> yTox = getPathsToArr(p, y, x, {{y}});
+
+    
+    // these are the canonical indeces for the array when we want to
+    // index into that array as the LHS.
+    map<const Arr *, Index *> arr2slice;
+
+    for(vector<Arr *> path : yTox) {
+        vector<const Arr *> indeces;
+
+        // have already seen this array
+        for(Arr *a : path) {
+            if (arr2slice.find(a) != arr2slice.end()) continue;
+
+            // have not seen the array, create indeces for it.
+            vector<const Arr *> sliceIxs;
+            for(int i = 0; i < a->sh.ndim; ++i) {
+                const string ixname = a->name + "_" +  to_string(i);
+                sliceIxs.push_back(new Arr(ixname));
+            }
+            arr2slice[a] = new Index(a, sliceIxs);
+        }
+    }
+
 
     Expr *allsum = new ConstantInt(0);
     for(vector<Arr *> path : yTox) {
@@ -1506,13 +1577,21 @@ Expr* takeIndirectDerivatives(Program &p, Arr *y, Arr *x, map<pair<Arr *, Arr*>,
             Expr *rhs = p[path[i]];
             if (!rhs) continue;
 
-            vector<const Arr *> ixs;
-            for (int j = 0; j < path[i+1]->sh.ndim; ++j) {
-                ixs.push_back(new Arr("j" + to_string(j)));
-            }
-            // Expr *der = rhs->grad(path[i+1]->name, ixs)->normalize();
-            // Arr *arrder = new Arr("d" + path[i]->name + "_" + "d" + path[i+1]->name);
-            // // builder.copy(arrder, der);
+            // take the derivative (y3/y2)
+            Expr *der = rhs->grad(path[i+1]->name, arr2slice[path[i+1]]->ixs)->normalize();
+            vector<const Arr *> derIndeces;
+
+            // insert all indeces from the array at path[i], path[i+1]
+            derIndeces.insert(derIndeces.end(),
+                    arr2slice[path[i]]->ixs.begin(), 
+                    arr2slice[path[i]]->ixs.end());
+
+            derIndeces.insert(derIndeces.end(),
+                    arr2slice[path[i+1]]->ixs.begin(), 
+                    arr2slice[path[i+1]]->ixs.end());
+
+            Arr *arrder = new Arr("d" + path[i]->name + "_" + "d" + path[i+1]->name);
+            builder.copy(arrder, derIndeces, der);
             // chainprod = new Mul(chainprod, arrder);
         }
         allsum = new Add(allsum, chainprod);
@@ -1566,8 +1645,8 @@ void test_lstm() {
 
     // cout << "dl_dH2H: |" << p[loss]->grad("H2H", {new Arr("i'"), new Arr("j'")})->normalize()->to_str_with_shape() << "|\n";
     // cout << "dl_dH2H: |" << p[loss]->grad("H2H", {new Arr("i'"), new Arr("j'")})->normalize()->to_str_with_shape() << "|\n";
-    takeDirectDerivatives(p, p[loss], "l", {predict});
-    takeDirectDerivatives(p, p[hiddens[1]], "h1", {H2H});
+    // takeDirectDerivatives(p, p[loss], "l", {predict});
+    // takeDirectDerivatives(p, p[hiddens[1]], "h1", {H2H});
 
 
 
@@ -1592,6 +1671,7 @@ void test_lstm() {
     */
 
     cout << "*****LSTM(full)*****:\n";
+    takeIndirectDerivatives(p, loss, H2H);
     cout << p.to_str();
 }
 
