@@ -1,3 +1,5 @@
 model.pth
 rnn
 core
+.idea/
+cmake-build-debug
