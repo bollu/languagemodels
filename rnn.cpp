@@ -739,6 +739,10 @@ struct ExprVisitor {
     virtual Expr *visitIndex(Index *i) {
         Expr *e = visitArr(i->arr);
         Arr *a = dynamic_cast<Arr *>(e);
+        if (!a) { 
+            cerr << "\n\tunable to find array: " << i->to_str() << "\n" <<
+                flush;
+        }
         assert(a);
         return new Index(a, i->ixs);
     }
@@ -947,6 +951,12 @@ struct Program {
         stmts.findAssign(arr, &a);
         assert(a);
         return *a;
+    }
+
+    bool is_array_assigned(Arr *arr) {
+        Assign *a = nullptr;
+        stmts.findAssign(arr, &a);
+        return a != nullptr;
     }
 
     std::map<Index *, Expr *> arrays() {
@@ -1643,6 +1653,9 @@ set<std::vector<Arr *>> getPathsToArr(Program &p, Arr *cur, Arr *target, set<vec
     }
 
     ArrayGatherVisitor agv;
+
+    // this array does not exist in the program, so just return.
+    if (!p.is_array_assigned(cur)) { return {}; }
     Expr *rhs = p[cur].rhs;
 
     // cout << "rhs for " << cur->name << " : " << (rhs ? rhs->to_str() : "NULL") << "\n";
@@ -1679,7 +1692,6 @@ Expr *codegenDerivativeChain(Program &p, vector<Arr *> arrs, vector<const Arr*> 
     arr2ix[arrs[0]] = outixs;
     arr2ix[arrs[n-1]] = inixs;
 
-    // arr2expr[arrs[n-1]] = 
     arr2expr[arrs[0]] = p[arrs[0]].rhs;
 
     for(int i = 1; i < n - 1; ++i) {
@@ -1743,142 +1755,50 @@ Expr *codegenDerivativeChain(Program &p, vector<Arr *> arrs, vector<const Arr*> 
 // compute dy/dx, through any chain of expressions needed.
 // TODO: keep a map of dy/dx -> array holding this value
 
-Expr* takeIndirectDerivatives(Program &p, Arr *y, Arr *x, vector<const Arr*> ixs ) {
+Expr* takeIndirectDerivatives(Program &p, Arr *y, Arr *x, vector<const Arr*> inixs, vector<const Arr *> outixs ) {
     IRBuilder builder(p);
     set<vector<Arr *>> yTox = getPathsToArr(p, y, x, {{y}});
 
-    // the arrays that occurs along the path of the derivative
-    set<Arr *> das;
-
-    for(vector<Arr *> path : yTox) {
-        das.insert(path.begin(), path.end());
-    }
-
-    
-    // these are the canonical indeces for the array when we want to
-    // index into that array as the LHS.
-    map<const Arr *, Index *> a2ix;
-
-    for(Arr *a : das) {
-        // have not seen the array, create indeces for it.
-        vector<const Arr *> ixs;
-        for(int i = 0; i < a->sh.ndim; ++i) {
-            const string ixname = a->name + "_" +  to_string(i);
-            ixs.push_back(new Arr(ixname));
-        }
-        a2ix[a] = new Index(a, ixs);
-
-
-        cout << "replaced: " << a->to_str() << 
-            "| riendexed: " << a2ix[a]->to_str() << "\n";
-    }
-
-    // these are the canonical expression for an array, which we
-    // have re-indexed.
-    map<const Arr *, Expr *> a2v;
-    for (auto it : p.arrays()) {
-        Index *lhs = it.first;
-        assert(lhs);
-
-        Index *lhsReindexed = a2ix[it.first->arr];
-        assert(lhsReindexed);
-
-        assert(lhsReindexed->arr == lhs->arr);
-
-        Expr *rhs = it.second;
-
-        assert(lhs->ixs.size() == lhsReindexed->ixs.size());
-        cout << "Reindexing " <<it.first->arr->name << ":";
-        for (int i = 0; i < (int)lhs->ixs.size(); ++i) {
-            cout << "\n\t" << lhs->ixs[i]->name << " => " << lhsReindexed->ixs[i]->name;
-            cout << "\n\told: " << rhs->to_str(); 
-            rhs = rhs->subst(lhs->ixs[i], lhsReindexed->ixs[i]);
-            cout << "\n\tnew: " << rhs->to_str(); 
-        }
-        cout << "\n";
-
-        a2v[lhs->arr]  = rhs;
-        
-        cout << "replaced: " << lhs->arr->to_str() << 
-            "\n\trhs: " << rhs->to_str() << 
-            "\n\trhs': " << a2v[lhs->arr]->to_str() << "\n";
-    }
-
     Expr *allsum = new ConstantInt(0);
-    for(vector<Arr *> path : yTox) {
-        // y3 -> y2 -> y1
-        // y3/y2 . y2/y1
-        Expr *chainprod = x->ix(ixs);
-
-        cout << "\n-";
-        for(int i = 0; i < (int) path.size(); ++i) {
-            cout << path[i]->name << " ";
-        }
-        cout << flush;
-
-        for(int i = path.size() - 2; i >= 0; i--) {
-            Expr *rhs = a2v[path[i]];
-            if (!rhs) { assert(false && "unable to find expression"); }
-
-            // take the derivative (y3/y2)
-            Expr *der = 
-                rhs->grad(path[i]->name, a2ix[path[i]]->ixs)->normalize();
-            vector<const Arr *> derIndeces;
-
-            // insert all indeces from the array at path[i], path[i+1]
-            derIndeces.insert(derIndeces.end(),
-                    a2ix[path[i]]->ixs.begin(), 
-                    a2ix[path[i]]->ixs.end());
-
-            derIndeces.insert(derIndeces.end(),
-                    a2ix[path[i-1]]->ixs.begin(), 
-                    a2ix[path[i-1]]->ixs.end());
-
-            Arr *arrder = 
-                new Arr("d" + path[i]->name + "_" + "d" + path[i-1]->name,
-                        path[i]->sh.appendInside(path[i-1]->sh));
-            builder.copy(arrder->ix(derIndeces), der);
-
-            // we need a contraction over all the denominator indeces
-            // need to contract over dernominator
-            if (!chainprod) { 
-                chainprod = arrder->ix(ixs);
-            } else {
-                chainprod = new Mul(chainprod, arrder->ix(a2ix[path[i]]->ixs));
-                Index *ixs = a2ix[path[i+1]];
-                assert(ixs && "unable to find array");
-                for(const Arr *ix : ixs->ixs) {
-                    chainprod = new Contract(ix, chainprod);
-                }
-            }
-        }
-        allsum = new Add(allsum, chainprod);
+    for (vector<Arr *> path  : yTox) {
+        cout << "\n- path: "; for(Arr *a : path) { cout << a->to_str() << " "; }
+        allsum = new Add(allsum, codegenDerivativeChain(p, path, inixs, outixs));
     }
     return allsum;
 }
 
 
-Expr *cell(Arr *I2H, Arr *H2H, Arr *i, Arr *h, Arr *ix) {
-    return new Tanh(new Add(matvecmul(I2H, i, ix), matvecmul(H2H, h, ix)));
+Expr *cell(Program &p, Arr *I2H, Arr *H2H, Arr *i, Arr *h, Arr *I2Hi, Arr *H2Hh,  Arr *ix) {
+    IRBuilder builder(p);
+    builder.copy(H2Hh->ix(ix),  matvecmul(H2H, h, ix));
+    builder.copy(I2Hi->ix(ix),  matvecmul(I2H, i, ix));
+    return new Tanh(new Add(I2Hi->ix(ix), H2Hh->ix(ix)));
 }
 
 
 void test_lstm() {
     static const int EMBEDSIZE = 5;
     static const int HIDDENSIZE = 10;
-    static const int NINPUTS = 1;
+    static const int NINPUTS = 2;
 
     Arr *inputs[NINPUTS];
+    Arr *I2Hi[NINPUTS];
     Arr *hiddens[NINPUTS+1];
+    Arr *H2Hh[NINPUTS];
 
     for(int i = 0; i < NINPUTS; ++i) {
         inputs[i] = new Arr("i" + to_string(i), EMBEDSIZE);
+        I2Hi[i] = new Arr("I2Hi" + to_string(i), EMBEDSIZE);
     }
 
     (void)(inputs);
 
     for(int i = 0; i < NINPUTS+1; ++i) {
         hiddens[i] = new Arr("h" + to_string(i), HIDDENSIZE);
+    }
+
+    for(int i = 0; i < NINPUTS; ++i) {
+        H2Hh[i] = new Arr("H2Hh" + to_string(i), HIDDENSIZE);
     }
 
     Arr *ix = new Arr("ix");
@@ -1892,7 +1812,7 @@ void test_lstm() {
 
     Arr *hprev = hiddens[0];
     for(int i = 0; i < NINPUTS; ++i) {
-        builder.copy(hiddens[i+1]->ix(ix), cell(I2H, H2H, inputs[i], hprev, ix)); //new Tanh(matvecmul(H2H, hprev, ix)));
+        builder.copy(hiddens[i+1]->ix(ix), cell(p, I2H, H2H, inputs[i], hprev, I2Hi[i], H2Hh[i], ix)); //new Tanh(matvecmul(H2H, hprev, ix)));
         hprev = hiddens[i+1];
     }
 
@@ -1934,15 +1854,17 @@ void test_lstm() {
     // builder.copy(new Arr("dloss_dH2H"), finalDer->normalize());
     */
 
-    cout << "*****LSTM(full)*****:\n";
     Arr *i = new Arr("i"), *j = new Arr("j");
-    Expr *der = codegenDerivativeChain(p, {loss, predict, hiddens[1], H2H}, {i, j}, {});
+    // Expr *der = codegenDerivativeChain(p, {loss, predict, hiddens[1], H2H}, {i, j}, {});
+    Expr *der = takeIndirectDerivatives(p, loss, H2H, {i, j}, {})->normalize();
     cout << "program:\n" << p.to_str() << "\n";
     cout << "derivative:\n\t" << der->to_str() << "\n";
     // Arr *dH2H = new Arr("dH2H", HIDDENSIZE, HIDDENSIZE);
-    // Expr *der = takeIndirectDerivatives(p, loss, H2H, {i, j});
-    // cout << p.to_str() << flush;
-    // builder.copy(dH2H->ix(i, j),  der);
+    builder.incr(H2H->ix(i, j), der);
+
+    cout << "*****LSTM(full)*****:\n";
+    cout << p.to_str();
+
 
 }
 
