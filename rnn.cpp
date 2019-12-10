@@ -174,12 +174,35 @@ struct Index;
 struct Arr;
 struct Program; 
 
+// TODO: we need some way for an Arr to decay into an Index gracefully?
+typedef struct Arr {
+    string name;
+    Shape sh;
+    Arr(string name, Shape sh) : 
+        name(name), sh(sh) {};
+    Arr(string name) :
+        name(name), sh(Shape::zerod()) {}
+    Arr(string name, int ix1) : 
+        name(name), sh(Shape::oned(ix1)) {}
+    Arr(string name, int ix1, int ix2) : 
+        name(name), sh(Shape::twod(ix1, ix2)) {}
+
+    string to_str() const { return name + (sh.ndim > 0 ? sh.to_str() : ""); };
+
+    Shape shape() const { return sh; }
+
+    // helpers to index
+    Index *ix(vector<const Arr *> ix);
+    Index *ix();
+    Index *ix(const Arr *ix1);
+    Index *ix(const Arr *ix, const Arr *ix2);
+
+} Arr;
+
 struct Expr {
     // gives type of expression
     ExprType ty;
     Expr(ExprType ty): ty(ty) {};
-
-    Expr *contract(const Arr* ix);
 
     // print as string
     virtual string to_str() const = 0;
@@ -224,50 +247,6 @@ struct ConstantInt : public Expr {
 };
 
 
-// TODO: we need some way for an Arr to decay into an Index gracefully?
-struct Index;
-typedef struct Arr : public Expr {
-    string name;
-    Shape sh;
-    Arr(string name, Shape sh) : 
-        Expr(ExprType::Arr), name(name), sh(sh) {};
-    Arr(string name) :
-        Expr(ExprType::Arr), name(name), sh(Shape::zerod()) {}
-    Arr(string name, int ix1) : 
-        Expr(ExprType::Arr), name(name), sh(Shape::oned(ix1)) {}
-    Arr(string name, int ix1, int ix2) : 
-        Expr(ExprType::Arr), name(name), sh(Shape::twod(ix1, ix2)) {}
-
-    string to_str() const { return name + (sh.ndim > 0 ? sh.to_str() : ""); };
-
-    set<const Arr *> free() const {
-        return set<const Arr *>();
-    }
-
-    Expr *grad_(string garr, vector<const Arr *> ixs) {
-        // if we ever get here, then we should be 0-dimensional
-        assert(ixs.size() == 0);
-        if (garr == name) { return new ConstantInt(1); };
-        return new ConstantInt(0);
-    }
-
-    // do we not need to substitute the 1D array?
-    Expr *subst(const Arr *old, const Arr *new_) const {
-        // if we ever get here, then we should be 0-dimensional
-        if (name == old->name) return new Arr(new_->name);
-        return new Arr(name);
-        //return new Arr(name);
-    }
-
-    Shape shape() const { return sh; }
-
-    // helpers to index
-    Index *ix(vector<const Arr *> ix);
-    Index *ix();
-    Index *ix(const Arr *ix1);
-    Index *ix(const Arr *ix, const Arr *ix2);
-
-} Arr;
 
 
 string Expr::to_str_with_shape() const {
@@ -549,7 +528,7 @@ struct Index : public Expr {
     }
 
     set<const Arr*> free() const {
-        set<const Arr*> s = arr->free();
+        set<const Arr*> s;
         s.insert(ixs.begin(), ixs.end());
         return s;
     }
@@ -568,7 +547,11 @@ struct Index : public Expr {
 
         assert(gixs.size() == ixs.size());
 
-        if (gixs.size() == 0) { return  arr->grad_(name, gixs); }
+        // we have a scalar.
+        if (gixs.size() == 0) { 
+            if (this->arr->name == name) { return new ConstantInt(1); }
+            else { return new ConstantInt(0); }
+        }
 
         assert(gixs.size() >= 1);
 
@@ -654,10 +637,6 @@ struct Contract : public Expr {
 };
 
 
-Expr *Expr::contract(const Arr* ix) {
-    return new Contract(ix, this);
-}
-
 struct Tanh : public Expr {
     Expr *inner;
     Tanh(Expr *inner) : Expr(ExprType::Tanh), inner(inner) {
@@ -700,8 +679,6 @@ struct ExprVisitor {
             return visitContract(c);
         } else if (Index *i = dynamic_cast<Index *>(e)) {
             return visitIndex(i);
-        } else if (Arr *a = dynamic_cast<Arr *>(e)) {
-            return visitArr(a);
         } else if (Tanh *tanh = dynamic_cast<Tanh *>(e)) {
             return visitExpr(tanh->inner);
         } else {
@@ -734,19 +711,8 @@ struct ExprVisitor {
         return new Contract(c->ix, inner);
     }
 
-    virtual Expr *visitArr(Arr *a) {
-        return new Arr(a->name, a->sh);
-    }
-
     virtual Expr *visitIndex(Index *i) {
-        Expr *e = visitArr(i->arr);
-        Arr *a = dynamic_cast<Arr *>(e);
-        if (!a) { 
-            cerr << "\n\tunable to find array: " << i->to_str() << "\n" <<
-                flush;
-        }
-        assert(a);
-        return new Index(a, i->ixs);
+        return new Index(i->arr, i->ixs);
     }
 };
 
@@ -1598,9 +1564,9 @@ Expr *l2(Arr *v, Arr *w) {
 
 struct ArrayGatherVisitor : public ExprVisitor {
     set<Arr *> arrays;
-    Expr *visitArr(Arr *a) {
-        arrays.insert(a);
-        return a;
+    Expr *visitIndex(Index *i) {
+        arrays.insert(i->arr);
+        return ExprVisitor::visitIndex(i);
     }
 };
 
