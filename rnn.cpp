@@ -110,7 +110,6 @@ struct Shape {
 
     Shape removeOutermostN(int N) const {
         Shape sh;
-        assert(ndim > 0);
         assert(N <= ndim);
         sh.ndim = ndim - N;
         for(int i = 0; i < ndim - N; ++i) {
@@ -566,9 +565,12 @@ struct Index : public Expr {
         // we ARE the slce of the array we were looking for.
         assert(name == arr->name);
 
-        assert(gixs.size() >= 1);
 
         assert(gixs.size() == ixs.size());
+
+        if (gixs.size() == 0) { return  arr->grad_(name, gixs); }
+
+        assert(gixs.size() >= 1);
 
         // create deltas, one for each index of the array.
         Expr *cur = new Delta(ixs[0], gixs[0]);
@@ -805,6 +807,14 @@ struct Assign : public Stmt {
             }
             */
 
+            if (lhs->shape() != rhs->shape()) {
+                cerr<< "mismatched array sizes of LHS and rhs:";
+                cerr << "\n\tlhs: " << "|shape: " << lhs->shape().to_str() << "|expr:" << lhs->to_str();
+                cerr << "\n\trhs: " << "|shape: " << rhs->shape().to_str() <<  "|expr: " << rhs->to_str() << "\n";
+            }
+            
+            assert(lhs->shape() == rhs->shape());
+
             const set<const Arr *> free = rhs->free();
             if (type == AssignType::Reference) {
                 if (lhs->ixs.size() >= free.size()) {
@@ -917,14 +927,16 @@ struct Block : public Stmt {
 };
 
 struct Forall : public Stmt {
-    const Arr* ix;
+    vector<const Arr*> ixs;
     Block inner;
 
-    Forall (const Arr* ix) : ix(ix) {};
+    Forall (vector<const Arr*> ixs) : ixs(ixs) {};
 
     string to_str(int depth) const {
         string s = "";
-        s += "forall " + ix->name + " {\n";
+        s += "forall ";
+        for (const Arr *ix : ixs) { s += ix->name + " "; }
+        s += "{\n";
         s += inner.to_str(depth + 1);
         s += "\n" + string(' ', depth) + "}";
         return s;
@@ -1000,7 +1012,7 @@ struct IRBuilder {
                     rhs));
     }
 
-    Forall *insertFor(const Arr* ix) {
+    Forall *insertFor(vector<const Arr*> ix) {
         Forall *f = new Forall(ix);
         insertPoint->stmts.push_back(f);
         return f;
@@ -1471,7 +1483,7 @@ void test_program_dot_batched() {
     Program p;
 
     IRBuilder builder(p);
-    Forall *forbi = builder.insertFor(bi);
+    Forall *forbi = builder.insertFor({bi});
 
     builder.setInsertPoint(forbi);
     Expr *dots = new Contract(i, new Mul(focuses->ix(bi, i), ctxes->ix(bi, i)));
@@ -1492,42 +1504,6 @@ void test_program_dot_batched() {
 
 
 }
-
-void test_program_dot_batched_indirect() {
-    cout << "*****program batched, indirect addressed dot (final code that we need for word embeddings)*****\n";
-    static const int BATCHSIZE = 10;
-    static const int EMBEDSIZE = 4;
-    Arr *focuses = new Arr("focuses", BATCHSIZE, EMBEDSIZE);
-    Arr *ctxes = new Arr("ctxes", BATCHSIZE, EMBEDSIZE);
-    Arr *focus = new Arr("focus", EMBEDSIZE);
-    Arr *ctx = new Arr("ctx", EMBEDSIZE);
-    Arr *dot = new Arr("dot");
-    Arr *loss = new Arr("loss");
-
-    Arr *bi = new Arr("bi");
-    Arr *i = new Arr("i"), *k = new Arr("k");
-    Program p;
-
-    IRBuilder builder(p);
-    // builder.setInsertPoint(builder.insertFor(bi));
-    Forall *forbi = builder.insertFor(bi);
-    builder.setInsertPoint(forbi);
-    
-    builder.reference(focus->ix(i), focuses->ix(bi, i));
-    builder.reference(ctx->ix(i), ctxes->ix(bi, i));
-
-    builder.copy(dot->ix(), new Contract(i, new Mul(focus->ix(i), ctx->ix(i))));
-    builder.copy(loss->ix(), new Sub(new ConstantInt(1), p[dot].rhs));
-
-    Expr *lr = new ConstantFloat(1e-2);
-
-    builder.incr(focus->ix(k),
-        new Mul (lr, p[loss].rhs->grad("focus", {k})->normalize()));
-    builder.incr(ctx->ix(k),
-            new Mul (lr, p[loss].rhs->grad("ctx", {k})->normalize()));
-    cout << p.to_str();
-}
-
 
 void test_program_dot_indicrect() {
     cout << "*****program indirect dot*****\n";
@@ -1566,6 +1542,53 @@ Expr *matvecmul(Arr *m, Arr *v, Arr *ix) {
     Arr *c = new Arr("c");
     return new Contract(c, new Mul(m->ix(ix, c), v->ix(c)));
 }
+
+void test_program_dot_batched_indirect() {
+    cout << "*****program batched, indirect addressed dot (final code that we need for word embeddings)*****\n";
+    static const int BATCHSIZE = 10;
+    static const int EMBEDSIZE = 4;
+    Arr *focuses = new Arr("focuses", BATCHSIZE, EMBEDSIZE);
+    Arr *ctxes = new Arr("ctxes", BATCHSIZE, EMBEDSIZE);
+    Arr *focus = new Arr("focus");
+    Arr *ctx = new Arr("ctx");
+    Arr *dot = new Arr("dot");
+    Arr *loss = new Arr("loss");
+
+    Arr *bi = new Arr("bi");
+    Arr *i = new Arr("i");
+    // Arr *k = new Arr("k");
+    Program p;
+
+    IRBuilder builder(p);
+    // builder.setInsertPoint(builder.insertFor(bi));
+    Forall *forbi = builder.insertFor({bi, i});
+    builder.setInsertPoint(forbi);
+    
+    builder.reference(focus->ix(), focuses->ix(bi, i));
+    builder.reference(ctx->ix(), ctxes->ix(bi, i));
+
+    builder.incr(dot->ix(), new Mul(focus->ix(), ctx->ix()));
+
+
+    builder.setInsertPoint(p);
+    forbi = builder.insertFor({bi, i});
+    builder.setInsertPoint(forbi);
+    builder.copy(loss->ix(), new Sub(new ConstantInt(1), p[dot].rhs));
+
+    Expr *lr = new ConstantFloat(1e-2);
+
+    Arr *focusl = new Arr("focusl");
+    Arr *ctxl = new Arr("ctxl");
+    builder.reference(focusl->ix(), focuses->ix(bi, i));
+    builder.reference(ctxl->ix(), ctxes->ix(bi, i));
+    builder.incr(focusl->ix(),
+        new Mul (lr, p[loss].rhs->grad("focus", {})->normalize()));
+    builder.incr(ctxl->ix(),
+            new Mul (lr, p[loss].rhs->grad("ctx", {})->normalize()));
+    cout << p.to_str();
+}
+
+
 
 Expr *l2(Arr *v, Arr *w) {
     Arr *c = new Arr("c");
@@ -1879,7 +1902,7 @@ int main(int argc, char **argv) {
     // test_program_dot();
     // test_program_dot_batched();
     // test_program_dot_indicrect();
-    // test_program_dot_batched_indirect();
+    test_program_dot_batched_indirect();
 
     test_lstm();
     return 0;
