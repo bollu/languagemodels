@@ -165,17 +165,22 @@ struct Index;
 struct Arr;
 struct Program;
 
+enum class NumType { Float, Int };
+
 // TODO: we need some way for an Arr to decay into an Index gracefully?
 typedef struct Arr {
     string name;
     Shape sh;
+    NumType ty = NumType::Float;
 
     Arr() : name("UNINITIALIZED(-42)"){};
-    Arr(string name, Shape sh) : name(name), sh(sh){};
+    Arr(string name, Shape sh, NumType ty = NumType::Float)
+        : name(name), sh(sh), ty(ty){};
     Arr(string name) : name(name), sh(Shape::zerod()) {}
-    Arr(string name, int ix1) : name(name), sh(Shape::oned(ix1)) {}
-    Arr(string name, int ix1, int ix2)
-        : name(name), sh(Shape::twod(ix1, ix2)) {}
+    Arr(string name, int ix1, NumType ty = NumType::Float)
+        : name(name), sh(Shape::oned(ix1)), ty(ty) {}
+    Arr(string name, int ix1, int ix2, NumType ty = NumType::Float)
+        : name(name), sh(Shape::twod(ix1, ix2)), ty(ty) {}
 
     string to_str() const { return name + (sh.ndim > 0 ? sh.to_str() : ""); };
 
@@ -676,7 +681,7 @@ struct Stmt {
     // return the RHS of the expression if the statement has it.
     // return nullptr otherwise;
     virtual void findAssign(Arr arr, Assign **arrptr) = 0;
-    virtual std::map<Index *, Expr *> arrays() = 0;
+    virtual vector<Assign> assigns() = 0;
 };
 
 template <typename T>
@@ -816,7 +821,7 @@ struct Assign : public Stmt {
         }
     }
 
-    std::map<Index *, Expr *> arrays() { return {{lhs, rhs}}; }
+    std::vector<Assign> assigns() { return {*this}; }
 };
 
 struct Block : public Stmt {
@@ -841,13 +846,13 @@ struct Block : public Stmt {
         }
     }
 
-    std::map<Index *, Expr *> arrays() {
-        std::map<Index *, Expr *> m;
+    vector<Assign> assigns() {
+        vector<Assign> as;
         for (Stmt *s : stmts) {
-            std::map<Index *, Expr *> sm = s->arrays();
-            m.insert(sm.begin(), sm.end());
+            vector<Assign> sas = s->assigns();
+            as.insert(as.end(), sas.begin(), sas.end());
         }
-        return m;
+        return as;
     }
 };
 
@@ -865,7 +870,7 @@ struct Forall : public Stmt {
         }
         s += "{\n";
         s += inner.to_str(depth + 1);
-        s += "\n" + string(' ', depth) + "}";
+        s += "\n" + string(depth, ' ') + "}";
         return s;
     }
 
@@ -873,7 +878,7 @@ struct Forall : public Stmt {
         return inner.findAssign(arr, assignptr);
     }
 
-    std::map<Index *, Expr *> arrays() { return inner.arrays(); }
+    vector<Assign> assigns() { return inner.assigns(); }
 };
 
 struct Program {
@@ -894,7 +899,7 @@ struct Program {
         return a != nullptr;
     }
 
-    std::map<Index *, Expr *> arrays() { return stmts.arrays(); }
+    vector<Assign> assigns() { return stmts.assigns(); }
 };
 
 // welcome LLVM my old friend
@@ -1183,7 +1188,7 @@ Expr *simplify(Expr *e, bool debug) {
 
 Expr *Expr::normalize() { return simplify(this, false); };
 
-struct IndexingVisitor : public ExprVisitor {
+struct IndexGatherVisitor : public ExprVisitor {
     vector<Index *> indexes;
 
     virtual Expr *visitIndex(Index *i) {
@@ -1192,11 +1197,19 @@ struct IndexingVisitor : public ExprVisitor {
     }
 };
 
+struct ArrayGatherVisitor : public ExprVisitor {
+    set<Arr> arrays;
+    Expr *visitIndex(Index *i) {
+        arrays.insert(i->arr);
+        return ExprVisitor::visitIndex(i);
+    }
+};
+
 // check that all arrays inside the contraction which use the shape c
 // have the same size.
 void verifyContractionShape(Arr c, Expr *inner) {
     assert(c.sh.ndim == 0 && "c must be a scalar along which are contracting");
-    IndexingVisitor iv;
+    IndexGatherVisitor iv;
     iv.visitExpr(inner);
     map<int, set<Index *>> size2ix;
 
@@ -1299,6 +1312,151 @@ vector<int> parse_sentence(FILE *f) {
         sentence.push_back(it->second);
     }
 }
+
+struct CodegenC {
+    string program(Program &p) {
+        set<Arr> allArrays;
+        set<Arr> boundArrays;
+
+        for (Assign a : p.assigns()) {
+            boundArrays.insert(a.lhs->arr);
+            ArrayGatherVisitor agv;
+            agv.visitExpr(a.rhs);
+            allArrays.insert(agv.arrays.begin(), agv.arrays.end());
+        }
+
+        set<Arr> freeArrays = subtract(allArrays, boundArrays);
+
+        // generate free arrays as parameters
+        string out;
+        out += "void f(";
+        int i = 0;
+        for (Arr a : freeArrays) {
+            out += (a.ty == NumType::Float ? "float" : "int");
+            out += "* ";
+            out += a.name;
+            if (i < (int)freeArrays.size() - 1) {
+                out += ", ";
+            }
+            ++i;
+        }
+
+        out += ") {\n";
+
+        // start code generation of statements
+        stmt(&p.stmts, out, 0);
+
+        out += "}";
+
+        return out;
+    }
+
+    void stmt(Stmt *s, string &out, int depth) {
+        if (Assign *a = dynamic_cast<Assign *>(s)) {
+            switch (a->type) {
+                // ref = val
+                case AssignType::Reference:
+                    out += string(depth, ' ');
+                    index(a->lhs, out, depth);
+                    out += " = ";
+                    expr(a->rhs, out, depth);
+                    out += ";";
+                    break;
+                case AssignType::Copy:
+                    out += string(depth, ' ');
+                    out += "*";
+                    index(a->lhs, out, depth);
+                    out += " = ";
+                    expr(a->rhs, out, depth);
+                    out += ";";
+                    break;
+                case AssignType::Incr:
+                    out += string(depth, ' ');
+                    out += "*";
+                    index(a->lhs, out, depth);
+                    out += " += ";
+                    expr(a->rhs, out, depth);
+                    out += ";";
+                    break;
+            }
+        } else if (Forall *fa = dynamic_cast<Forall *>(s)) {
+            // we need to know the array limits
+            for (Arr a : fa->ixs) {
+                depth += 2;
+                out += string(depth, ' ');
+                out += "for (";
+                out += "int " + a.name + " = 0; ";
+                const int TODO_THRESOLD = 42;
+                out += a.name + " < " + to_string(TODO_THRESOLD) + "; ";
+                out += a.name + "+= 1";
+                out += ") {\n";
+            }
+
+            stmt(&fa->inner, out, depth);
+
+            for (Arr a : fa->ixs) {
+                out += "\n" + string(depth, ' ') + "} /*end " +
+                       a.name + "*/";
+                depth -= 2;
+            }
+
+        } else if (Block *b = dynamic_cast<Block *>(s)) {
+            for (Stmt *bs : b->stmts) {
+                stmt(bs, out, depth + 2);
+                out += "\n";
+            }
+        } else {
+            assert(false && "unknown stmt type.");
+        }
+    }
+
+    void expr(Expr *e, string &out, int depth) {
+        if (Index *ix = dynamic_cast<Index *>(e)) {
+            out += "(*";
+            index(ix, out, depth);
+            out += ")";
+        } else if (Mul *m = dynamic_cast<Mul *>(e)) {
+            out += "(1";
+
+            for (Expr *me : m->inner) {
+                out += "*";
+                expr(me, out, depth);
+            }
+            out += ")";
+        } else if (Sub *s = dynamic_cast<Sub *>(e)) {
+            out += "(";
+            expr(s->l, out, depth);
+            out += " - ";
+            expr(s->r, out, depth);
+            out += ")";
+        } else if (ConstantInt *i = dynamic_cast<ConstantInt *>(e)) {
+            out += to_string(i->i);
+        } else if (ConstantFloat *f = dynamic_cast<ConstantFloat *>(e)) {
+            out += to_string(f->f);
+        } else {
+            cerr << "\n\tunknown expr: " << e->to_str() << "\n" << std::flush;
+            assert(false && "unknown expression type");
+        }
+    }
+
+    // generate (arr + delta)
+    void index(Index *ix, string &out, int depth) {
+        out += "(";
+        out += ix->arr.name;
+        // now, build up the index expression
+        int stride = 1;
+        for (int i = 0; i < (int)ix->ixs.size(); ++i) {
+            out += "+";
+            out += "(";
+            out += to_string(stride);
+            out += "*";
+            out += ix->ixs[i].name;
+            out += ")";
+            stride *= ix->arr.sh[i];
+        }
+        out += ")";
+    }
+};
 
 void test_expr_dot() {
     int NDIMS = 3;
@@ -1505,6 +1663,10 @@ void test_program_dot_batched_indirect() {
     builder.incr(ctxl.ix(),
                  new Mul(lr, p[loss].rhs->grad("ctx", {})->normalize()));
     cout << p.to_str();
+
+    cout << "*****Codegened word embddings code:*****\n";
+    CodegenC cc;
+    cout << cc.program(p) << "\n";
 }
 
 Expr *l2(Arr v, Arr w) {
@@ -1512,14 +1674,6 @@ Expr *l2(Arr v, Arr w) {
     Expr *s = new Sub(v.ix(c), w.ix(c));
     return new Contract(c, new Mul(s, s));
 }
-
-struct ArrayGatherVisitor : public ExprVisitor {
-    set<Arr> arrays;
-    Expr *visitIndex(Index *i) {
-        arrays.insert(i->arr);
-        return ExprVisitor::visitIndex(i);
-    }
-};
 
 // compute dy/dx
 
@@ -1722,37 +1876,7 @@ void test_lstm() {
     cout << "*****LSTM*****:\n";
     cout << p.to_str();
 
-    // cout << "dl_dH2H: |" << p[loss]->grad("H2H", {new Arr("i'"), new
-    // Arr("j'")})->normalize()->to_str_with_shape() << "|\n"; cout << "dl_dH2H:
-    // |" << p[loss]->grad("H2H", {new Arr("i'"), new
-    // Arr("j'")})->normalize()->to_str_with_shape() << "|\n";
-    // takeDirectDerivatives(p, p[loss], "l", {predict});
-    // takeDirectDerivatives(p, p[hiddens[1]], "h1", {H2H});
-
-    ////// ----
-    ////// ---- map<pair<Arr *, Arr *>, Arr*> ders;
-    ////// ---- Expr *finalDer = takeIndirectDerivatives(p, loss, H2H, ders);
-    ////// ---- builder.copy(new Arr("dl/dH2H"), finalDer->normalize());
-
-    ////// ---- cout << "\n\n paths from loss to H2H:\n";
-    ////// ---- set<vector<Arr *>> paths = getPathsToArr(p, loss, H2H,
-    ///{{loss}});
-    ////// ---- for(vector<Arr *> path : paths) {
-    ////// ----     cout << "- ";
-    ////// ----     for(Arr *a : path) {
-    ////// ----         cout << a->name << " ";
-    ////// ----     }
-    ////// ----     cout << "\n";
-    ////// ---- }
-
-    ////// ---- // map<pair<Arr *, Arr *>, Arr*> ders;
-    ////// ---- // Expr *finalDer = takeIndirectDerivatives(p, loss, H2H, ders);
-    ////// ---- // builder.copy(new Arr("dloss_dH2H"), finalDer->normalize());
-    ////// ----
-
     Arr i("i"), j("j");
-    // Expr *der = codegenDerivativeChain(p, {loss, predict, hiddens[1], H2H},
-    // {i, j}, {});
     Expr *der = takeIndirectDerivatives(p, loss, H2H, {i, j}, {})->normalize();
     cout << "program:\n" << p.to_str() << "\n";
     cout << "derivative:\n\t" << der->to_str() << "\n";
@@ -1761,57 +1885,6 @@ void test_lstm() {
 
     cout << "*****LSTM(full)*****:\n";
     cout << p.to_str();
-}
-
-Expr *gradProgram(Program &p, Expr *y, Arr *x) {
-    const map<Index *, Expr *> ix2expr = p.arrays();
-    const map<Arr *, Expr *> arr2expr;
-
-    // if we have l in the program, then recursively grad the expression
-    Arr *a = dynamic_cast<Arr *>(y);
-    if (a) {
-        // a naked array can only be 0-dimensional. Otherwise,
-        // it must have been sliced.
-        assert(a->sh.ndim == 0);
-        auto it = arr2expr.find(a);
-        // this array does not have an expression associated to it,
-        // so we can differentiate it as if it were a leaf.
-        if (it == arr2expr.end()) {
-            if (a->name == x->name) {
-                return new ConstantInt(1);
-            } else {
-                return new ConstantInt(0);
-            }
-        } else {
-            // we differentiate the inner expression
-            // d(scalar)/dx = d(scalar value)/dx
-        }
-    }
-
-    return nullptr;
-}
-
-// take the derivatives of this expression with all arrays in "params"
-// that occur directly within it
-void takeDirectDerivatives(Program &p, Expr *e, string name, set<Arr> params) {
-    ArrayGatherVisitor agv;
-    agv.visitExpr(e);
-
-    IRBuilder builder(p);
-    for (Arr a : agv.arrays) {
-        if (params.find(a) == params.end()) continue;
-
-        vector<Arr> ixs;
-        for (int i = 0; i < a.sh.ndim; ++i) {
-            ixs.push_back(Arr("d" + to_string(i)));
-        }
-
-        Expr *grad = e->grad(a.name, ixs);
-        cout << "d" << name << "/d" << a.name << ":\n\t"
-             << grad->to_str_with_shape() << "\n";
-        // builder.copy(new Arr("d" + name + "_d" + a->name),
-        // grad->normalize());
-    }
 }
 
 int main(int argc, char **argv) {
