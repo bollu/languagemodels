@@ -1433,7 +1433,12 @@ struct CodegenC {
             out += to_string(i->i);
         } else if (ConstantFloat *f = dynamic_cast<ConstantFloat *>(e)) {
             out += to_string(f->f);
+        } else if (Contract *c = dynamic_cast<Contract *>(e)) {
+            // code generate contraction
+            // we can codegen a _function_ that computes the contraction.
+            // god I want a monad.
         } else {
+
             cerr << "\n\tunknown expr: " << e->to_str() << "\n" << std::flush;
             assert(false && "unknown expression type");
         }
@@ -1885,6 +1890,9 @@ void test_lstm() {
 
     cout << "*****LSTM(full)*****:\n";
     cout << p.to_str();
+
+    CodegenC cc;
+    cout << "******LSTM(codegen)******\n" << cc.program(p) << "\n";
 }
 
 int main(int argc, char **argv) {
