@@ -232,7 +232,7 @@ struct Expr {
     virtual Shape shape() const = 0;
 };
 
-void verifyIndexing(Expr *e);
+map<Arr, set<pair<int, Index*>>> verifyIndexing(Expr *e);
 
 struct ConstantInt : public Expr {
     int i;
@@ -562,7 +562,6 @@ Index *Arr::ix() { return new Index(*this, {}); }
 
 Index *Arr::ix(Arr ix1, Arr ix2) { return new Index(*this, {ix1, ix2}); }
 
-
 struct Contract : public Expr {
     Arr ix;
     Expr *inner;
@@ -749,14 +748,33 @@ struct Assign : public Stmt {
         // TODO: add an exhaustiveness check that the set of indeces
         // is equal to the set of free indeces.
 
-        /*
-        for (const Arr * ix: indeces) {
-            assert(ix->sh.ndim == 0 && "can only index with zero dimensional
-        arrays");
+        for (Arr ix : lhs->ixs) {
+            assert(ix.sh.ndim == 0 &&
+                   "can only index with zero dimensional arrays");
         }
-        */
+        map<Arr, set<pair<int, Index *>>> index2indeces = verifyIndexing(rhs);
 
-        verifyIndexing(rhs);
+        for(int i = 0; i < (int)lhs->ixs.size(); ++i) {
+            Arr ix = lhs->ixs[i];
+            // the index is not used on the RHS, so we have something
+            // like A[i] = 10
+            if (!index2indeces.count(ix)) continue;
+
+            set<pair<int, Index *>> equivclass = index2indeces[ix];
+            assert(equivclass.size() > 0);
+
+            int refsize;
+            Index *refix;
+            std::tie(refsize, refix) = *equivclass.begin();
+
+            if (refsize == lhs->arr.sh[i]) continue;
+
+            cerr << "inconsistent use of size in LHS and RHS along index |" << ix.name << "|\n";
+            cerr << "  - LHS size: " << lhs->arr.sh[i] << " | array: " << lhs->arr.to_str() << "\n";
+            cerr << "  - RHS size: " << refsize << " | index: " << refix->to_str_with_shape() << "\n";
+            cerr << "  - RHS: " << rhs->to_str_with_shape() << "\n";
+            assert(false && "inconsistent use of size in LHS and RHS");
+        }
 
         if (lhs->shape() != rhs->shape()) {
             cerr << "mismatched array sizes of LHS and rhs:";
@@ -1248,7 +1266,7 @@ struct ArrayGatherVisitor : public ExprVisitor {
     }
 };
 
-void verifyIndexing(Expr *e) {
+map<Arr, set<pair<int, Index*>>> verifyIndexing(Expr *e) {
     IndexGatherVisitor iv;
     iv.visitExpr(e);
 
@@ -1287,6 +1305,8 @@ void verifyIndexing(Expr *e) {
             assert(false && "inconsistent use of index for sizes");
         }
     }
+
+    return index2indexes;
 }
 
 void add_word_to_vocab(string w) {
@@ -2032,8 +2052,9 @@ void test_lstm() {
 
     Arr hprev = hiddens[0];
     for (int i = 0; i < NINPUTS; ++i) {
-        builder.copy(hiddens[i + 1].ix(ix),
-                     cell(p, I2H, H2H, inputs[i], hprev, I2Hi[i], H2Hh[i], ix));
+        Expr *c = cell(p, I2H, H2H, inputs[i], hprev, I2Hi[i], H2Hh[i], ix);
+        cout << "program:\n" << p.to_str() << "\n";
+        builder.copy(hiddens[i + 1].ix(ix), c);
         hprev = hiddens[i + 1];
     }
 
