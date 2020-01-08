@@ -232,7 +232,7 @@ struct Expr {
     virtual Shape shape() const = 0;
 };
 
-map<Arr, set<pair<int, Index*>>> verifyIndexing(Expr *e);
+map<Arr, set<pair<int, Index *>>> verifyIndexing(Expr *e);
 
 struct ConstantInt : public Expr {
     int i;
@@ -754,7 +754,7 @@ struct Assign : public Stmt {
         }
         map<Arr, set<pair<int, Index *>>> index2indeces = verifyIndexing(rhs);
 
-        for(int i = 0; i < (int)lhs->ixs.size(); ++i) {
+        for (int i = 0; i < (int)lhs->ixs.size(); ++i) {
             Arr ix = lhs->ixs[i];
             // the index is not used on the RHS, so we have something
             // like A[i] = 10
@@ -769,9 +769,12 @@ struct Assign : public Stmt {
 
             if (refsize == lhs->arr.sh[i]) continue;
 
-            cerr << "inconsistent use of size in LHS and RHS along index |" << ix.name << "|\n";
-            cerr << "  - LHS size: " << lhs->arr.sh[i] << " | array: " << lhs->arr.to_str() << "\n";
-            cerr << "  - RHS size: " << refsize << " | index: " << refix->to_str_with_shape() << "\n";
+            cerr << "inconsistent use of size in LHS and RHS along index |"
+                 << ix.name << "|\n";
+            cerr << "  - LHS size: " << lhs->arr.sh[i]
+                 << " | array: " << lhs->arr.to_str() << "\n";
+            cerr << "  - RHS size: " << refsize
+                 << " | index: " << refix->to_str_with_shape() << "\n";
             cerr << "  - RHS: " << rhs->to_str_with_shape() << "\n";
             assert(false && "inconsistent use of size in LHS and RHS");
         }
@@ -1266,7 +1269,7 @@ struct ArrayGatherVisitor : public ExprVisitor {
     }
 };
 
-map<Arr, set<pair<int, Index*>>> verifyIndexing(Expr *e) {
+map<Arr, set<pair<int, Index *>>> verifyIndexing(Expr *e) {
     IndexGatherVisitor iv;
     iv.visitExpr(e);
 
@@ -2000,7 +2003,8 @@ map<Arr, Arr> reverseDiff(Program &p, Arr z) {
             // write into dz_di
             builder.incr(
                 dz_di.ix(iixs),
-                Contract::contract(oixs, new Mul(dz_do.ix(oixs), do_di)));
+                Contract::contract(oixs, new Mul(dz_do.ix(oixs), do_di))
+                    ->normalize());
 
             horizon.push(i);
         }
@@ -2018,7 +2022,8 @@ Expr *cell(Program &p, Arr I2H, Arr H2H, Arr i, Arr h, Arr I2Hi, Arr H2Hh,
 }
 
 void test_lstm() {
-    static const int EMBEDSIZE = 5;
+    // size of input/output arrays
+    static const int IOSIZE = 5;
     static const int HIDDENSIZE = 10;
     static const int NINPUTS = 1;
 
@@ -2028,8 +2033,8 @@ void test_lstm() {
     Arr H2Hh[NINPUTS];
 
     for (int i = 0; i < NINPUTS; ++i) {
-        inputs[i] = Arr("i" + to_string(i), EMBEDSIZE);
-        I2Hi[i] = Arr("I2Hi" + to_string(i), EMBEDSIZE);
+        inputs[i] = Arr("i" + to_string(i), IOSIZE);
+        I2Hi[i] = Arr("I2Hi" + to_string(i), HIDDENSIZE);
     }
 
     (void)(inputs);
@@ -2043,9 +2048,9 @@ void test_lstm() {
     }
 
     Arr ix("ix");
-    Arr I2H("I2H", HIDDENSIZE, EMBEDSIZE);
+    Arr I2H("I2H", HIDDENSIZE, IOSIZE);
     Arr H2H("H2H", HIDDENSIZE, HIDDENSIZE);
-    Arr H2O("H2O", EMBEDSIZE, HIDDENSIZE);
+    Arr H2O("H2O", IOSIZE, HIDDENSIZE);
 
     Program p;
     IRBuilder builder(p);
@@ -2058,10 +2063,10 @@ void test_lstm() {
         hprev = hiddens[i + 1];
     }
 
-    Arr predict("p", EMBEDSIZE);
+    Arr predict("p", IOSIZE);
     builder.copy(predict.ix(ix), matvecmul(H2O, hprev, ix));
 
-    Arr output("o", EMBEDSIZE);
+    Arr output("o", IOSIZE);
     Arr loss("l");
     builder.copy(loss.ix(), l2(output, predict));
 
