@@ -6,6 +6,7 @@
 #include <iostream>
 #include <list>
 #include <map>
+#include <queue>
 #include <set>
 #include <stack>
 #include <string>
@@ -230,6 +231,8 @@ struct Expr {
 
     virtual Shape shape() const = 0;
 };
+
+void verifyIndexing(Expr *e);
 
 struct ConstantInt : public Expr {
     int i;
@@ -559,8 +562,6 @@ Index *Arr::ix() { return new Index(*this, {}); }
 
 Index *Arr::ix(Arr ix1, Arr ix2) { return new Index(*this, {ix1, ix2}); }
 
-// check that the contraction along this dimension is indeed correct.
-void verifyContractionShape(Arr ix, Expr *inner);
 
 struct Contract : public Expr {
     Arr ix;
@@ -568,7 +569,6 @@ struct Contract : public Expr {
     Contract(Arr ix, Expr *inner)
         : Expr(ExprType::Contract), ix(ix), inner(inner) {
         assert(inner->shape() == Shape::zerod());
-        verifyContractionShape(ix, inner);
     };
 
     string to_str() const {
@@ -594,6 +594,13 @@ struct Contract : public Expr {
     }
 
     Shape shape() const { return Shape::zerod(); }
+
+    static Expr *contract(vector<Arr> ixs, Expr *e) {
+        for (Arr ix : ixs) {
+            e = new Contract(ix, e);
+        }
+        return e;
+    }
 };
 
 struct Tanh : public Expr {
@@ -706,6 +713,29 @@ set<T> symmetricdifference(const set<T> &a, const set<T> &b) {
     return d;
 }
 
+// statement to zero an array
+struct ZeroStmt : public Stmt {
+    Arr lhs;
+
+    ZeroStmt(Arr lhs) : lhs(lhs){};
+
+    string to_str(int depth) const {
+        cout << string(depth, ' ');
+
+        string s = "(";
+        s += lhs.to_str();
+        s += " := ";
+        s += "ZERO)";
+        return s;
+    }
+
+    virtual void findAssign(Arr arr, Assign **arrptr) {
+        (void)arr;
+        *arrptr = nullptr;
+    }
+    virtual vector<Assign> assigns() { return {}; }
+};
+
 struct Assign : public Stmt {
     AssignType type;
     // TODO: make this non-pointer.
@@ -725,6 +755,8 @@ struct Assign : public Stmt {
         arrays");
         }
         */
+
+        verifyIndexing(rhs);
 
         if (lhs->shape() != rhs->shape()) {
             cerr << "mismatched array sizes of LHS and rhs:";
@@ -788,6 +820,15 @@ struct Assign : public Stmt {
                    "index set and free variable set are not equal");
         }
     };
+
+    bool operator==(const Assign &other) const {
+        return this->lhs == other.lhs && this->rhs == other.rhs;
+    }
+
+    bool operator<(const Assign &other) const {
+        return this->lhs < other.lhs ||
+               (this->lhs == other.lhs && this->rhs < other.rhs);
+    }
 
     string to_str(int depth) const {
         cout << string(depth, ' ');
@@ -930,6 +971,8 @@ struct IRBuilder {
         insertPoint->stmts.push_back(
             new Assign(AssignType::Reference, ix, rhs));
     }
+
+    void zero(Arr arr) { insertPoint->stmts.push_back(new ZeroStmt(arr)); }
 
     Forall *insertFor(vector<Arr> ix) {
         Forall *f = new Forall(ix);
@@ -1205,43 +1248,45 @@ struct ArrayGatherVisitor : public ExprVisitor {
     }
 };
 
-// check that all arrays inside the contraction which use the shape c
-// have the same size.
-void verifyContractionShape(Arr c, Expr *inner) {
-    assert(c.sh.ndim == 0 && "c must be a scalar along which are contracting");
+void verifyIndexing(Expr *e) {
     IndexGatherVisitor iv;
-    iv.visitExpr(inner);
-    map<int, set<Index *>> size2ix;
+    iv.visitExpr(e);
 
-    for (Index *e : iv.indexes) {
-        for (int i = 0; i < (int)e->ixs.size(); ++i) {
-            // this is not the index we are looking for
-            if (e->ixs[i] != c) continue;
+    // a map from indeces to index expression
+    // eg. A[i] + B[j] + C[i, j]
+    //  i -> { A[i], C[i, j] } | j -> { B[j] + C[i, j] }
+    map<Arr, set<pair<int, Index *>>> index2indexes;
 
-            // insert this size
-            size2ix[e->arr.sh[i]].insert(e);
+    for (Index *ixe : iv.indexes) {
+        for (int i = 0; i < (int)ixe->ixs.size(); ++i) {
+            Arr ix = ixe->ixs[i];
+            index2indexes[ix].insert(make_pair(ixe->arr.sh[i], ixe));
         }
     }
 
-    // contracting over an expression with consistent sizes
-    if (size2ix.size() == 1) return;
+    for (auto it : index2indexes) {
+        set<pair<int, Index *>> equivclass = it.second;
+        assert(equivclass.size() > 0 && "cannot have empty equivalence class");
 
-    // contracting over an expression with no array (a scalar, say).
-    // For example, after constant folding: (>< 0)
-    if (size2ix.size() == 0) return;
+        int refsize;
+        Index *refix;
 
-    cerr << "*****Incorrect contraction sizes*****\n";
-    cerr << "e: " << inner->to_str_with_shape() << "\n";
-    for (auto it : size2ix) {
-        cerr << "size: " << it.first;
-        cerr << " | indexes: ";
-        for (Index *i : it.second) {
-            cerr << i->to_str() << " | ";
+        std::tie(refsize, refix) = *equivclass.begin();
+
+        for (pair<int, Index *> sizeIx : equivclass) {
+            if (sizeIx.first == refsize) continue;
+
+            // error! found indeces that don't match
+            cerr << "*** ERROR: inconsistent use of index |" << it.first.name
+                 << "| with respect to sizes of arrays\n";
+            cerr << "  - size: |" << refsize << "| "
+                 << "ix: |" << refix->to_str_with_shape() << "|\n";
+            cerr << "  - size: |" << sizeIx.first << "| "
+                 << "ix: |" << sizeIx.second->to_str_with_shape() << "|\n";
+            cerr << "  - expr: |" << e->to_str_with_shape() << "| \n";
+            assert(false && "inconsistent use of index for sizes");
         }
-        cerr << "\n";
     }
-
-    assert(false && "inconsistent indexing with sizes");
 }
 
 void add_word_to_vocab(string w) {
@@ -1395,8 +1440,7 @@ struct CodegenC {
             stmt(&fa->inner, out, depth);
 
             for (Arr a : fa->ixs) {
-                out += "\n" + string(depth, ' ') + "} /*end " +
-                       a.name + "*/";
+                out += "\n" + string(depth, ' ') + "} /*end " + a.name + "*/";
                 depth -= 2;
             }
 
@@ -1437,8 +1481,9 @@ struct CodegenC {
             // code generate contraction
             // we can codegen a _function_ that computes the contraction.
             // god I want a monad.
+            (void)c;
+            assert(false && "unimplemented codegen for Contract");
         } else {
-
             cerr << "\n\tunknown expr: " << e->to_str() << "\n" << std::flush;
             assert(false && "unknown expression type");
         }
@@ -1823,6 +1868,127 @@ Expr *takeIndirectDerivatives(Program &p, Arr y, Arr x, vector<Arr> inixs,
     return allsum;
 }
 
+// map an array to all uses of the array
+map<Arr, set<Assign>> getUses(Program p) {
+    map<Arr, set<Assign>> a2uses;
+    for (Assign assign : p.assigns()) {
+        ArrayGatherVisitor agv;
+        agv.visitExpr(assign.rhs);
+        for (Arr used : agv.arrays) {
+            // map the used array on the RHS to the user on the LHS
+            a2uses[used].insert(assign);
+        }
+    }
+
+    return a2uses;
+}
+
+// map an array to all arrays used to compute this array
+map<Arr, set<Arr>> getDependences(Program p) {
+    map<Arr, set<Arr>> a2deps;
+    for (Assign assign : p.assigns()) {
+        ArrayGatherVisitor agv;
+        agv.visitExpr(assign.rhs);
+        for (Arr in : agv.arrays) {
+            a2deps[assign.lhs->arr].insert(in);
+        }
+    }
+
+    return a2deps;
+}
+
+// compute ds/dz for all variables reachable from $z$. Returns a mapping
+// from each array to expressions
+map<Arr, Arr> reverseDiff(Program &p, Arr z) {
+    IRBuilder builder(p);
+    assert(z.sh.ndim == 0);
+    map<Arr, set<Arr>> deps = getDependences(p);
+
+    cout << "=================================================\n";
+    for (auto it : deps) {
+        cout << it.first.name << " -> ";
+        cout << "{ ";
+        for (auto a : it.second) {
+            cout << a.name << " ";
+        }
+        cout << "}";
+        cout << "\n";
+    }
+    cout << "=================================================\n";
+
+    map<Arr, Arr> dz_darr;
+    Arr dz_dz("dz_dz");
+    builder.copy(dz_dz.ix(), new ConstantInt(1));
+    dz_darr[z] = dz_dz;
+
+    queue<Arr> horizon;
+    horizon.push(z);
+
+    while (!horizon.empty()) {
+        Arr o = horizon.front();
+        horizon.pop();
+        cout << "analyzing uses of: |" << o.name << "| \n";
+
+        // array is not differentiable (not part of program)
+        if (!p.is_array_assigned(o)) {
+            continue;
+        }
+
+        // dz/do
+        Assign oassign = p[o];
+        Expr *oval = oassign.rhs;
+        vector<Arr> oixs = oassign.lhs->ixs;
+
+        assert(dz_darr.count(o));
+        // array that hold derivative of ao wrt dz
+        Arr dz_do = dz_darr.find(o)->second;
+
+        // write out into every input
+        // dz_di += dz_do x do_di [where o = f(i, ...) do_di = df_di]
+        for (Arr i : deps[o]) {
+            cout << "\tanalyzing |" << o.name << "| = f(" << i.name << ")\n";
+
+            // needs to be initialized
+            Arr dz_di;
+            if (dz_darr.count(i)) {
+                dz_di = dz_darr.find(i)->second;
+            } else {
+                dz_di = Arr("d" + z.name + "_d" + i.name, i.sh);
+                dz_darr.insert(std::make_pair(i, dz_di));
+                // TODO: write zero.
+            }
+
+            vector<Arr> iixs;
+            for (int ix = 0; ix < i.sh.ndim; ++ix) {
+                iixs.push_back(Arr(i.name + "_" + std::to_string(ix)));
+            }
+
+            // do/di
+            Expr *do_di = oval->grad(i.name, iixs)->normalize();
+            (void)(do_di);
+
+            do_di = do_di->normalize();
+            cout << "contracting along: ";
+            for (Arr i : iixs) {
+                cout << i.name << " ";
+            }
+            cout << "\n";
+            cout << "  - dz/do:" << dz_do.to_str() << "\n";
+            cout << "  - do/di:" << do_di->normalize()->to_str_with_shape()
+                 << "\n";
+
+            // write into dz_di
+            builder.incr(
+                dz_di.ix(iixs),
+                Contract::contract(oixs, new Mul(dz_do.ix(oixs), do_di)));
+
+            horizon.push(i);
+        }
+    }
+
+    return dz_darr;
+}
+
 Expr *cell(Program &p, Arr I2H, Arr H2H, Arr i, Arr h, Arr I2Hi, Arr H2Hh,
            Arr ix) {
     IRBuilder builder(p);
@@ -1834,7 +2000,7 @@ Expr *cell(Program &p, Arr I2H, Arr H2H, Arr i, Arr h, Arr I2Hi, Arr H2Hh,
 void test_lstm() {
     static const int EMBEDSIZE = 5;
     static const int HIDDENSIZE = 10;
-    static const int NINPUTS = 2;
+    static const int NINPUTS = 1;
 
     Arr inputs[NINPUTS];
     Arr I2Hi[NINPUTS];
@@ -1882,11 +2048,10 @@ void test_lstm() {
     cout << p.to_str();
 
     Arr i("i"), j("j");
-    Expr *der = takeIndirectDerivatives(p, loss, H2H, {i, j}, {})->normalize();
-    cout << "program:\n" << p.to_str() << "\n";
-    cout << "derivative:\n\t" << der->to_str() << "\n";
+    map<Arr, Arr> arr2der = reverseDiff(p, loss);
+
     // Arr *dH2H = new Arr("dH2H", HIDDENSIZE, HIDDENSIZE);
-    builder.incr(H2H.ix(i, j), der);
+    // builder.incr(H2H.ix(i, j), der);
 
     cout << "*****LSTM(full)*****:\n";
     cout << p.to_str();
@@ -1904,7 +2069,7 @@ int main(int argc, char **argv) {
     test_program_dot_indicrect();
     test_program_dot_batched_indirect();
     test_lstm();
-    return 0;
+    // return 0;
 
     if (argc != 2) {
         cout << "usage: <input-path>\n";
