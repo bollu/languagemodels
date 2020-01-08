@@ -56,15 +56,18 @@ def make_attention(s, e, name):
   return a, sattn
 
 
+# Variable: stuff to be learnt / model parameters
 var_syn0 = tf.Variable(tf.random_normal([VOCABSIZE, EMBEDSIZE]), name="syn0")
 var_syn1neg = tf.Variable(tf.random_normal([VOCABSIZE, EMBEDSIZE]), name="syn1neg")
 
+# placeholder: training data
 ph_fix = tf.placeholder(tf.int32, name="ph_fix")
 ph_cix = tf.placeholder(tf.int32, name="ph_cix")
 ph_label = tf.placeholder(tf.float32, name="ph_label")
 
 # loss = (label - (focus[fix] . ctx[cix])^2
-var_d = tf.tensordot(var_syn0[ph_fix, :], var_syn1neg[ph_cix, :], 1)
+# var_d = tf.tensordot(var_syn0[ph_fix, :], var_syn1neg[ph_cix, :], axis=1)
+var_d = tf.reduce_sum(tf.multiply(var_syn0[ph_fix, :], var_syn1neg[ph_cix, :]))
 # loss = tf.norm(tf.math.sub(ph_label, d), name="loss")
 var_loss = tf.norm(ph_label - var_d, name="loss")
 
