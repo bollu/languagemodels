@@ -661,7 +661,11 @@ void test_lstm() {
     //cout << "******LSTM(codegen)******\n" << cc.program(p) << "\n";
 
     CodegenMLIR cmlir;
-    cout << "******LSTM(codegen to MLIR)******\n" << cmlir.program(p) << "\n";
+    cout << "******LSTM(codegen to MLIR)******\n";
+    mlir::MLIRContext ctx;
+    mlir::ModuleOp mod = cmlir.program(ctx, p);
+    mod.dump();
+    cout << "****\n";
 }
 
 int main(int argc, char **argv) {
@@ -673,7 +677,7 @@ int main(int argc, char **argv) {
     test_program_dot_indicrect();
     test_program_dot_batched_indirect();
     test_lstm();
-    // return 0;
+    return 0;
 
     if (argc != 2) {
         cout << "usage: <input-path>\n";

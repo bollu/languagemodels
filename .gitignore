@@ -1,6 +1,6 @@
-model.pth
-rnn
-core
-.idea/
-cmake-build-debug
+compile_commands.json
+build/
+cmake-build-debug/
+.idea
 build
+model.pth

@@ -25,7 +25,6 @@ find_library(MLIRIR MLIRIR ${MLIR_LIBRARY_PATH})
 find_library(MLIRParser MLIRParser ${MLIR_LIBRARY_PATH})
 find_library(MLIRSideEffects MLIRSideEffects ${MLIR_LIBRARY_PATH})
 find_library(MLIRTransforms MLIRTransforms ${MLIR_LIBRARY_PATH})
-find_library(MLIRTransforms MLIRTransforms ${MLIR_LIBRARY_PATH})
 find_library(LLVMCore LLVMCore ${MLIR_LIBRARY_PATH})
 find_library(LLVMSupport LLVMSupport ${MLIR_LIBRARY_PATH})
 
@@ -35,7 +34,7 @@ message(MLIR_LIBRARY_PATH ${MLIR_LIBRARY_PATH})
 message(MLIRAnalysis ${MLIRAnalysis})
 
 target_link_libraries(languagemodels
-        ${MLIRANALYSIS}
+        ${MLIRAnalysis}
         ${MLIRIR}
         ${MLIRParser}
         ${MLIRSideEffects}
